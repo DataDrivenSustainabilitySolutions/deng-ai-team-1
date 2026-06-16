@@ -156,6 +156,7 @@ def plot_best_model_prediction(
     model.fit(X.iloc[train_index], y.iloc[train_index])
     X_test = X.iloc[test_index]
     y_test = y.iloc[test_index]
+    print(y_test.value_counts())
     prediction = model.predict(X_test)
     final_mae = float(mean_absolute_error(y_test, prediction))
     holdout_year = X_test.index.get_level_values("year").max()
