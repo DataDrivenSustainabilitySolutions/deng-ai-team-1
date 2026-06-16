@@ -7,6 +7,7 @@ Example:
 import argparse
 import math
 import os
+import random
 from pathlib import Path
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
@@ -205,6 +206,24 @@ if args.csv_preview_max_cols < 1:
 
 if args.csv_preview_dpi < 1:
     raise ValueError("--csv-preview-dpi must be at least 1.")
+
+random.seed(args.random_state)
+np.random.seed(args.random_state)
+os.environ["PYTHONHASHSEED"] = str(args.random_state)
+
+deterministic_lightgbm_params = {
+    "random_state": args.random_state,
+    "seed": args.random_state,
+    "data_random_seed": args.random_state,
+    "feature_fraction_seed": args.random_state,
+    "bagging_seed": args.random_state,
+    "drop_seed": args.random_state,
+    "extra_seed": args.random_state,
+    "deterministic": True,
+    "force_col_wise": True,
+    "n_jobs": 1,
+    "verbose": -1,
+}
 
 if args.tune_hyperparameters:
     try:
@@ -483,8 +502,7 @@ base_model_params = {
     "colsample_bytree": 0.9,
     "reg_alpha": 0.1,
     "reg_lambda": 1.0,
-    "random_state": args.random_state,
-    "verbose": -1,
+    **deterministic_lightgbm_params,
 }
 city_model_params = {
     city: base_model_params.copy()
@@ -530,8 +548,7 @@ if args.tune_hyperparameters:
                 "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 5.0, log=True),
                 "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
                 "tweedie_variance_power": trial.suggest_float("tweedie_variance_power", 1.1, 1.8),
-                "random_state": args.random_state,
-                "verbose": -1,
+                **deterministic_lightgbm_params,
             }
             trial_fold_maes = []
 
@@ -561,6 +578,7 @@ if args.tune_hyperparameters:
             n_trials=args.optuna_trials,
             timeout=args.optuna_timeout or None,
             catch=(Exception,),
+            n_jobs=1,
         )
 
         for trial in study.trials:
@@ -573,8 +591,7 @@ if args.tune_hyperparameters:
                     "objective": "tweedie",
                     **trial.params,
                     "subsample_freq": 1,
-                    "random_state": args.random_state,
-                    "verbose": -1,
+                    **deterministic_lightgbm_params,
                 }
             )
 
@@ -587,8 +604,7 @@ if args.tune_hyperparameters:
                 "objective": "tweedie",
                 **study.best_params,
                 "subsample_freq": 1,
-                "random_state": args.random_state,
-                "verbose": -1,
+                **deterministic_lightgbm_params,
             }
             city_model_params[city] = best_params
             best_param_records.append(
