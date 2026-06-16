@@ -5,8 +5,11 @@ requires-python = ">=3.10"
 dependencies = [
     "lightgbm",
     "numpy",
+    "optuna",
     "pandas",
     "scikit-learn",
+    "statsmodels",
+    "matplotlib"
 ]
 
 [build-system]

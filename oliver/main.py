@@ -6,8 +6,15 @@ Example:
 
 import argparse
 import math
+import os
+import time
 from pathlib import Path
 
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
+os.environ["MPLCONFIGDIR"] = "/private/tmp/dengai_main_matplotlib"
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+
+import numpy as np
 import pandas as pd
 
 
@@ -18,7 +25,7 @@ default_output_dir_label = f"oliver/outputs/{script_name}"
 
 ### CLI arguments
 parser = argparse.ArgumentParser(
-    description="Run the DengAI pipeline from data import through feature engineering."
+    description="Run the DengAI pipeline from data import through submission generation."
 )
 parser.add_argument(
     "--train-features-csv",
@@ -43,7 +50,7 @@ parser.add_argument(
 parser.add_argument(
     "--output-dir",
     default=default_output_dir,
-    help=f"Directory for generated intermediate files. Default: {default_output_dir_label}",
+    help=f"Directory for generated pipeline outputs. Default: {default_output_dir_label}",
 )
 parser.add_argument(
     "--preprocessed-train-output",
@@ -67,7 +74,74 @@ parser.add_argument(
     default=[1, 2, 3, 4, 8, 12],
     help="Past total_cases lags to engineer. Default: 1 2 3 4 8 12",
 )
+parser.add_argument(
+    "--submission-output",
+    default="submission.csv",
+    help="Filename for final submission predictions. Default: submission.csv",
+)
+parser.add_argument(
+    "--validation-output",
+    default="validation_scores.csv",
+    help="Filename for expanding-year validation scores. Default: validation_scores.csv",
+)
+parser.add_argument(
+    "--validation-predictions-output",
+    default="validation_predictions.csv",
+    help="Filename for row-level validation predictions. Default: validation_predictions.csv",
+)
+parser.add_argument(
+    "--feature-importance-output",
+    default="feature_importance.csv",
+    help="Filename for final city model feature importance. Default: feature_importance.csv",
+)
+parser.add_argument(
+    "--random-state",
+    type=int,
+    default=42,
+    help="Random seed for LightGBM. Default: 42",
+)
+parser.add_argument(
+    "--tweedie-variance-power",
+    type=float,
+    default=1.3,
+    help="LightGBM Tweedie variance power. Default: 1.3",
+)
+parser.add_argument(
+    "--tune-hyperparameters",
+    action="store_true",
+    help="Use Optuna to tune separate LightGBM hyperparameters for each city.",
+)
+parser.add_argument(
+    "--optuna-trials",
+    type=int,
+    default=50,
+    help="Optuna trials per city when tuning is enabled. Default: 50",
+)
+parser.add_argument(
+    "--optuna-timeout",
+    type=int,
+    default=0,
+    help="Optuna timeout in seconds per city. Use 0 for no timeout. Default: 0",
+)
+parser.add_argument(
+    "--optuna-output",
+    default="optuna_trials.csv",
+    help="Filename for Optuna trial results. Default: optuna_trials.csv",
+)
+parser.add_argument(
+    "--best-params-output",
+    default="best_params.csv",
+    help="Filename for best per-city model parameters. Default: best_params.csv",
+)
 args = parser.parse_args()
+
+try:
+    from lightgbm import LGBMRegressor
+except ImportError as error:
+    raise ImportError(
+        "LightGBM is required for the modeling pipeline. Install the project dependencies "
+        "from the root pyproject.toml, for example: python3 -m pip install -e ."
+    ) from error
 
 
 ### Configuration
@@ -79,11 +153,44 @@ output_dir = Path(args.output_dir)
 preprocessed_train_path = output_dir / args.preprocessed_train_output
 preprocessed_test_path = output_dir / args.preprocessed_test_output
 missing_summary_path = output_dir / args.missing_summary_output
+submission_path = output_dir / args.submission_output
+validation_scores_path = output_dir / args.validation_output
+validation_predictions_path = output_dir / args.validation_predictions_output
+feature_importance_path = output_dir / args.feature_importance_output
+optuna_trials_path = output_dir / args.optuna_output
+best_params_path = output_dir / args.best_params_output
 merge_keys = ["city", "year", "weekofyear"]
 identifier_columns = {"city", "year", "weekofyear", "week_start_date", "split", "total_cases"}
+matplotlib_config_dir = output_dir / ".matplotlib"
+matplotlib_config_dir.mkdir(parents=True, exist_ok=True)
+os.environ["MPLCONFIGDIR"] = str(matplotlib_config_dir)
+
+from sklearn.metrics import mean_absolute_error
 
 if any(target_lag < 1 for target_lag in args.target_lags):
     raise ValueError("--target-lags must contain positive integers.")
+
+if not 1.0 < args.tweedie_variance_power < 2.0:
+    raise ValueError("--tweedie-variance-power must be between 1 and 2 for Tweedie regression.")
+
+if args.optuna_trials < 1:
+    raise ValueError("--optuna-trials must be at least 1.")
+
+if args.optuna_timeout < 0:
+    raise ValueError("--optuna-timeout must be non-negative.")
+
+if args.tune_hyperparameters:
+    try:
+        import optuna
+
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    except ImportError as error:
+        raise ImportError(
+            "Optuna is required when --tune-hyperparameters is used. Install the project "
+            "dependencies from pyproject.toml, for example: python3 -m pip install -e ."
+        ) from error
+else:
+    optuna = None
 
 
 ### Data import
@@ -263,12 +370,451 @@ preprocessed_test = (
 preprocessed_train.to_csv(preprocessed_train_path, index=False)
 preprocessed_test.to_csv(preprocessed_test_path, index=False)
 
-print("Pipeline completed through preprocessing and feature engineering.")
+
+### 3. Model feature sets
+target_lag_feature_columns = [
+    column for column in engineered_feature_columns if column.startswith("total_cases_lag_")
+]
+seasonality_feature_columns = ["weekofyear_sin", "weekofyear_cos"]
+
+sj_weather_roots = [
+    "reanalysis_air_temp_k",
+    "reanalysis_avg_temp_k",
+    "reanalysis_dew_point_temp_k",
+    "reanalysis_max_air_temp_k",
+    "reanalysis_min_air_temp_k",
+    "reanalysis_relative_humidity_percent",
+    "reanalysis_specific_humidity_g_per_kg",
+    "station_avg_temp_c",
+    "station_max_temp_c",
+    "station_min_temp_c",
+]
+iq_weather_roots = [
+    "reanalysis_specific_humidity_g_per_kg",
+    "reanalysis_dew_point_temp_k",
+    "reanalysis_min_air_temp_k",
+    "station_min_temp_c",
+    "station_avg_temp_c",
+    "station_max_temp_c",
+    "ndvi_ne",
+    "ndvi_nw",
+    "ndvi_se",
+    "ndvi_sw",
+    "precipitation_amt_mm",
+    "reanalysis_sat_precip_amt_mm",
+    "reanalysis_precip_amt_kg_per_m2",
+]
+
+city_feature_columns = {}
+for city in ["sj", "iq"]:
+    weather_feature_columns = []
+
+    if city == "sj":
+        for feature in sj_weather_roots:
+            if feature in data.columns:
+                weather_feature_columns.append(feature)
+            for column in engineered_feature_columns:
+                if column.startswith(f"{feature}_lag_"):
+                    weather_feature_columns.append(column)
+
+    if city == "iq":
+        short_lag_suffixes = ["lag_1", "lag_2", "lag_3", "lag_5", "lag_0_3_mean", "lag_1_3_mean"]
+        station_suffixes = ["lag_1", "lag_2", "lag_3", "lag_4", "lag_6", "lag_1_3_mean"]
+        ndvi_suffixes = ["lag_10", "lag_11", "lag_14"]
+        precip_suffixes = ["lag_2", "lag_3", "lag_0_3_mean", "lag_1_3_mean", "lag_2_5_mean"]
+
+        for feature in iq_weather_roots:
+            if feature in data.columns:
+                weather_feature_columns.append(feature)
+
+            for column in engineered_feature_columns:
+                if not column.startswith(f"{feature}_"):
+                    continue
+
+                suffix = column.removeprefix(f"{feature}_")
+                if feature.startswith("ndvi_") and suffix in ndvi_suffixes:
+                    weather_feature_columns.append(column)
+                elif "precip" in feature and suffix in precip_suffixes:
+                    weather_feature_columns.append(column)
+                elif feature.startswith("station_") and suffix in station_suffixes:
+                    weather_feature_columns.append(column)
+                elif feature.startswith("reanalysis_") and suffix in short_lag_suffixes:
+                    weather_feature_columns.append(column)
+
+    selected_columns = seasonality_feature_columns + target_lag_feature_columns + weather_feature_columns
+    city_feature_columns[city] = list(dict.fromkeys(selected_columns))
+
+
+### 4. Optional Optuna hyperparameter tuning
+base_model_params = {
+    "objective": "tweedie",
+    "tweedie_variance_power": args.tweedie_variance_power,
+    "n_estimators": 300,
+    "learning_rate": 0.03,
+    "num_leaves": 15,
+    "min_child_samples": 20,
+    "subsample": 0.9,
+    "colsample_bytree": 0.9,
+    "reg_alpha": 0.1,
+    "reg_lambda": 1.0,
+    "random_state": args.random_state,
+    "verbose": -1,
+}
+city_model_params = {
+    city: base_model_params.copy()
+    for city in ["sj", "iq"]
+}
+
+target_lags = sorted(set(args.target_lags))
+target_rolling_windows = [2, 4, 8]
+
+train_model_data = data[data["split"] == "train"].copy()
+test_model_data = data[data["split"] == "test"].copy()
+optuna_trial_records = []
+best_param_records = []
+
+if args.tune_hyperparameters:
+    for city, city_train_data in train_model_data.groupby("city", sort=False):
+        city_train_data = city_train_data.sort_values("week_start_date").copy()
+        year_counts = city_train_data.groupby("year").size()
+        full_years = [year for year, rows in year_counts.items() if rows == 52]
+        first_year = int(city_train_data["year"].min())
+        first_full_year_after_start = min(year for year in full_years if year > first_year)
+        validation_years = [
+            year
+            for year in full_years
+            if year > first_full_year_after_start
+        ]
+        feature_columns = city_feature_columns[city]
+
+        sampler = optuna.samplers.TPESampler(seed=args.random_state)
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=sampler,
+            study_name=f"{city}_lightgbm_tweedie",
+        )
+        city_tuning_start = time.monotonic()
+
+        for _ in range(args.optuna_trials):
+            if args.optuna_timeout > 0 and time.monotonic() - city_tuning_start >= args.optuna_timeout:
+                break
+
+            trial = study.ask()
+            trial_params = {
+                "objective": "tweedie",
+                "n_estimators": trial.suggest_int("n_estimators", 100, 800, step=50),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.08, log=True),
+                "num_leaves": trial.suggest_int("num_leaves", 7, 63),
+                "min_child_samples": trial.suggest_int("min_child_samples", 5, 80),
+                "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+                "subsample_freq": 1,
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+                "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 5.0, log=True),
+                "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+                "tweedie_variance_power": trial.suggest_float("tweedie_variance_power", 1.1, 1.8),
+                "random_state": args.random_state,
+                "verbose": -1,
+            }
+            trial_fold_maes = []
+
+            try:
+                for validation_year in validation_years:
+                    fold_train_data = city_train_data[city_train_data["year"] < validation_year].copy()
+                    fold_validation_data = city_train_data[city_train_data["year"] == validation_year].copy()
+
+                    model = LGBMRegressor(**trial_params)
+                    model.fit(
+                        fold_train_data[feature_columns],
+                        fold_train_data["total_cases"],
+                    )
+
+                    target_history = fold_train_data["total_cases"].astype(float).tolist()
+                    fold_predictions = []
+
+                    for row in fold_validation_data.itertuples(index=False):
+                        feature_row = fold_validation_data.loc[
+                            fold_validation_data["week_start_date"] == row.week_start_date,
+                            feature_columns,
+                        ].iloc[0].copy()
+
+                        for target_lag in target_lags:
+                            column = f"total_cases_lag_{target_lag}"
+                            feature_row[column] = (
+                                target_history[-target_lag]
+                                if len(target_history) >= target_lag
+                                else np.nan
+                            )
+
+                        for window in target_rolling_windows:
+                            recent_targets = target_history[-window:]
+                            mean_column = f"total_cases_lag_1_{window}_mean"
+                            max_column = f"total_cases_lag_1_{window}_max"
+                            feature_row[mean_column] = (
+                                float(np.mean(recent_targets)) if recent_targets else np.nan
+                            )
+                            feature_row[max_column] = (
+                                float(np.max(recent_targets)) if recent_targets else np.nan
+                            )
+
+                        raw_prediction = float(
+                            model.predict(pd.DataFrame([feature_row], columns=feature_columns))[0]
+                        )
+                        clipped_prediction = max(0.0, raw_prediction)
+                        integer_prediction = int(round(clipped_prediction))
+
+                        target_history.append(float(integer_prediction))
+                        fold_predictions.append(integer_prediction)
+
+                    fold_mae = mean_absolute_error(fold_validation_data["total_cases"], fold_predictions)
+                    trial_fold_maes.append(fold_mae)
+
+                trial_mae = float(np.mean(trial_fold_maes))
+                study.tell(trial, trial_mae)
+                trial_state = "COMPLETE"
+                trial_value = trial_mae
+            except Exception:
+                study.tell(trial, state=optuna.trial.TrialState.FAIL)
+                trial_state = "FAIL"
+                trial_value = np.nan
+
+            optuna_trial_records.append(
+                {
+                    "city": city,
+                    "trial_number": trial.number,
+                    "state": trial_state,
+                    "mae": trial_value,
+                    **trial_params,
+                }
+            )
+
+        completed_trials = study.get_trials(
+            deepcopy=False,
+            states=[optuna.trial.TrialState.COMPLETE],
+        )
+        if completed_trials:
+            best_params = {
+                "objective": "tweedie",
+                **study.best_params,
+                "subsample_freq": 1,
+                "random_state": args.random_state,
+                "verbose": -1,
+            }
+            city_model_params[city] = best_params
+            best_param_records.append(
+                {
+                    "city": city,
+                    "best_mae": study.best_value,
+                    **best_params,
+                }
+            )
+
+optuna_trials = pd.DataFrame(optuna_trial_records)
+best_params = pd.DataFrame(best_param_records)
+if args.tune_hyperparameters:
+    optuna_trials.to_csv(optuna_trials_path, index=False)
+    best_params.to_csv(best_params_path, index=False)
+
+
+### 5. Expanding full-year validation
+validation_score_records = []
+validation_prediction_records = []
+all_validation_actuals = []
+all_validation_predictions = []
+
+for city, city_train_data in train_model_data.groupby("city", sort=False):
+    city_train_data = city_train_data.sort_values("week_start_date").copy()
+    year_counts = city_train_data.groupby("year").size()
+    full_years = [year for year, rows in year_counts.items() if rows == 52]
+    first_year = int(city_train_data["year"].min())
+    first_full_year_after_start = min(year for year in full_years if year > first_year)
+    validation_years = [
+        year
+        for year in full_years
+        if year > first_full_year_after_start
+    ]
+    feature_columns = city_feature_columns[city]
+
+    for validation_year in validation_years:
+        fold_train_data = city_train_data[city_train_data["year"] < validation_year].copy()
+        fold_validation_data = city_train_data[city_train_data["year"] == validation_year].copy()
+
+        model = LGBMRegressor(**city_model_params[city])
+        model.fit(
+            fold_train_data[feature_columns],
+            fold_train_data["total_cases"],
+        )
+
+        target_history = fold_train_data["total_cases"].astype(float).tolist()
+        fold_predictions = []
+        fold_raw_predictions = []
+
+        for row in fold_validation_data.itertuples(index=False):
+            feature_row = fold_validation_data.loc[
+                fold_validation_data["week_start_date"] == row.week_start_date,
+                feature_columns,
+            ].iloc[0].copy()
+
+            for target_lag in target_lags:
+                column = f"total_cases_lag_{target_lag}"
+                feature_row[column] = target_history[-target_lag] if len(target_history) >= target_lag else np.nan
+
+            for window in target_rolling_windows:
+                recent_targets = target_history[-window:]
+                mean_column = f"total_cases_lag_1_{window}_mean"
+                max_column = f"total_cases_lag_1_{window}_max"
+                feature_row[mean_column] = float(np.mean(recent_targets)) if recent_targets else np.nan
+                feature_row[max_column] = float(np.max(recent_targets)) if recent_targets else np.nan
+
+            raw_prediction = float(model.predict(pd.DataFrame([feature_row], columns=feature_columns))[0])
+            clipped_prediction = max(0.0, raw_prediction)
+            integer_prediction = int(round(clipped_prediction))
+
+            target_history.append(float(integer_prediction))
+            fold_predictions.append(integer_prediction)
+            fold_raw_predictions.append(clipped_prediction)
+
+            validation_prediction_records.append(
+                {
+                    "city": row.city,
+                    "year": row.year,
+                    "weekofyear": row.weekofyear,
+                    "week_start_date": row.week_start_date,
+                    "validation_year": validation_year,
+                    "actual_total_cases": row.total_cases,
+                    "predicted_total_cases": integer_prediction,
+                    "predicted_total_cases_raw": clipped_prediction,
+                }
+            )
+
+        fold_mae = mean_absolute_error(fold_validation_data["total_cases"], fold_predictions)
+        all_validation_actuals.extend(fold_validation_data["total_cases"].tolist())
+        all_validation_predictions.extend(fold_predictions)
+        validation_score_records.append(
+            {
+                "city": city,
+                "validation_year": validation_year,
+                "train_rows": len(fold_train_data),
+                "validation_rows": len(fold_validation_data),
+                "mae": fold_mae,
+            }
+        )
+
+if all_validation_actuals:
+    validation_score_records.append(
+        {
+            "city": "all",
+            "validation_year": "all",
+            "train_rows": "",
+            "validation_rows": len(all_validation_actuals),
+            "mae": mean_absolute_error(all_validation_actuals, all_validation_predictions),
+        }
+    )
+
+validation_scores = pd.DataFrame(validation_score_records)
+validation_predictions = pd.DataFrame(validation_prediction_records)
+
+
+### 6. Final city models and submission
+submission = submission_format.copy()
+submission_predictions = {}
+feature_importance_records = []
+
+for city, city_train_data in train_model_data.groupby("city", sort=False):
+    city_train_data = city_train_data.sort_values("week_start_date").copy()
+    city_test_data = test_model_data[test_model_data["city"] == city].sort_values("week_start_date").copy()
+    feature_columns = city_feature_columns[city]
+
+    model = LGBMRegressor(**city_model_params[city])
+    model.fit(
+        city_train_data[feature_columns],
+        city_train_data["total_cases"],
+    )
+
+    gain_importance = model.booster_.feature_importance(importance_type="gain")
+    split_importance = model.booster_.feature_importance(importance_type="split")
+    for feature, gain, split in zip(feature_columns, gain_importance, split_importance):
+        feature_importance_records.append(
+            {
+                "city": city,
+                "feature": feature,
+                "importance_gain": gain,
+                "importance_split": split,
+            }
+        )
+
+    target_history = city_train_data["total_cases"].astype(float).tolist()
+
+    for row in city_test_data.itertuples(index=False):
+        feature_row = city_test_data.loc[
+            city_test_data["week_start_date"] == row.week_start_date,
+            feature_columns,
+        ].iloc[0].copy()
+
+        for target_lag in target_lags:
+            column = f"total_cases_lag_{target_lag}"
+            feature_row[column] = target_history[-target_lag] if len(target_history) >= target_lag else np.nan
+
+        for window in target_rolling_windows:
+            recent_targets = target_history[-window:]
+            mean_column = f"total_cases_lag_1_{window}_mean"
+            max_column = f"total_cases_lag_1_{window}_max"
+            feature_row[mean_column] = float(np.mean(recent_targets)) if recent_targets else np.nan
+            feature_row[max_column] = float(np.max(recent_targets)) if recent_targets else np.nan
+
+        raw_prediction = float(model.predict(pd.DataFrame([feature_row], columns=feature_columns))[0])
+        clipped_prediction = max(0.0, raw_prediction)
+        integer_prediction = int(round(clipped_prediction))
+
+        target_history.append(float(integer_prediction))
+        submission_predictions[(row.city, row.year, row.weekofyear)] = integer_prediction
+
+submission["total_cases"] = [
+    submission_predictions[(row.city, row.year, row.weekofyear)]
+    for row in submission.itertuples(index=False)
+]
+
+if list(submission.columns) != ["city", "year", "weekofyear", "total_cases"]:
+    raise ValueError("Submission columns must be city, year, weekofyear, total_cases.")
+
+if len(submission) != len(submission_format):
+    raise ValueError("Submission row count must match the submission format.")
+
+if not submission[merge_keys].equals(submission_format[merge_keys]):
+    raise ValueError("Submission row order must match the submission format.")
+
+if submission["total_cases"].isna().any():
+    raise ValueError("Submission contains missing total_cases predictions.")
+
+if (submission["total_cases"] < 0).any():
+    raise ValueError("Submission contains negative total_cases predictions.")
+
+submission["total_cases"] = submission["total_cases"].astype(int)
+feature_importance = pd.DataFrame(feature_importance_records).sort_values(
+    ["city", "importance_gain"],
+    ascending=[True, False],
+)
+
+validation_scores.to_csv(validation_scores_path, index=False)
+validation_predictions.to_csv(validation_predictions_path, index=False)
+feature_importance.to_csv(feature_importance_path, index=False)
+submission.to_csv(submission_path, index=False)
+
+
+print("Pipeline completed through preprocessing, feature engineering, validation, and submission.")
 print(f"Imported train rows: {len(train_data)}")
 print(f"Imported test rows: {len(test_data)}")
 print(f"Numeric feature missing values before interpolation: {int(missing_before.sum())}")
 print(f"Numeric feature missing values after interpolation: {int(missing_after.sum())}")
 print(f"Engineered feature columns: {len(engineered_feature_columns)}")
+print(f"Validation folds: {len(validation_scores[validation_scores['city'] != 'all'])}")
+if not validation_scores.empty:
+    overall_mae = validation_scores.loc[validation_scores["city"] == "all", "mae"]
+    if not overall_mae.empty:
+        print(f"Overall validation MAE: {overall_mae.iloc[0]:.4f}")
 print(f"Saved missing summary: {missing_summary_path}")
 print(f"Saved preprocessed and engineered train data: {preprocessed_train_path}")
 print(f"Saved preprocessed and engineered test data: {preprocessed_test_path}")
+print(f"Saved validation scores: {validation_scores_path}")
+print(f"Saved validation predictions: {validation_predictions_path}")
+print(f"Saved feature importance: {feature_importance_path}")
+print(f"Saved submission: {submission_path}")
