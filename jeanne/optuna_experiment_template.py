@@ -44,6 +44,17 @@ def build_model(trial: optuna.Trial) -> RandomForestRegressor:
         n_jobs=-1,
     )
 
+def yearly_time_series_splits(X: pd.DataFrame):
+    years = X.index.get_level_values("year").unique().sort_values()
+
+    for val_year in years[1:]:
+        year = X.index.get_level_values("year")
+
+        train_index = year < val_year
+        val_index = year == val_year
+
+        yield train_index, val_index
+
 
 def objective(trial: optuna.Trial) -> float:
     X, y = load_data("sj")
@@ -59,9 +70,8 @@ def objective(trial: optuna.Trial) -> float:
 
     try:
         fold_maes = []
-        tscv = TimeSeriesSplit(n_splits=5)
 
-        for fold, (train_index, test_index) in enumerate(tscv.split(X), start=1):
+        for fold, (train_index, test_index) in enumerate(yearly_time_series_splits(X)):
             model = build_model(trial)
             model.fit(X.iloc[train_index], y.iloc[train_index])
 
