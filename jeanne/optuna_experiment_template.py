@@ -154,8 +154,11 @@ def plot_best_model_prediction(
 
     model = build_model_from_params(best_params)
     model.fit(X.iloc[train_index], y.iloc[train_index])
-    prediction = model.predict(X.iloc[test_index])
-    final_mae = float(mean_absolute_error(y.iloc[test_index], prediction))
+    X_test = X.iloc[test_index]
+    y_test = y.iloc[test_index]
+    prediction = model.predict(X_test)
+    final_mae = float(mean_absolute_error(y_test, prediction))
+    holdout_year = X_test.index.get_level_values("year").max()
 
     dates = load_week_start_dates(city_id).reindex(X.index)
     train_data = pd.DataFrame(
@@ -167,7 +170,7 @@ def plot_best_model_prediction(
     test_data = pd.DataFrame(
         {
             "date": dates.iloc[test_index],
-            "total_cases": y.iloc[test_index],
+            "total_cases": y_test,
             "prediction": prediction,
         }
     )
@@ -180,7 +183,7 @@ def plot_best_model_prediction(
     ax.plot(test_data["date"], test_data["total_cases"], label="Test labels", color="#2563eb")
     ax.plot(test_data["date"], test_data["prediction"], label="Best model prediction", color="#dc2626")
     ax.axvline(test_data["date"].iloc[0], color="#6b7280", linestyle="--", linewidth=1)
-    ax.set_title(f"{city_id}: final holdout prediction")
+    ax.set_title(f"{city_id}: {holdout_year} holdout prediction (MAE: {final_mae:.3f})")
     ax.set_xlabel("Date")
     ax.set_ylabel("Total cases")
     ax.legend()
