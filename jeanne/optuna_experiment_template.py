@@ -23,7 +23,7 @@ PLOT_DIR = BASE_DIR / "optuna_plots"
 SUBMISSION_OUTPUT_PATH = DATA_DIR / "submission_prediction.csv"
 STUDY_NAME = "random_forest_forecasting_with_lags_and_rollings"
 STORAGE = f"sqlite:///{DB_PATH}"
-CITY_ID = "sj"
+CITY_ID = "iq"
 RANDOM_STATE = 7
 
 
