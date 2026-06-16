@@ -20,14 +20,26 @@ DATA_DIR = BASE_DIR.parent / "data"
 DB_PATH = BASE_DIR / "optuna_forecasting.db"
 CODECARBON_DIR = BASE_DIR / "codecarbon_logs"
 PLOT_DIR = BASE_DIR / "optuna_plots"
+SUBMISSION_OUTPUT_PATH = DATA_DIR / "submission_prediction.csv"
 STUDY_NAME = "random_forest_forecasting_with_lags_and_rollings"
 STORAGE = f"sqlite:///{DB_PATH}"
 CITY_ID = "sj"
 RANDOM_STATE = 7
 
 
+
+def make_lag_and_rolling_features(base_features: pd.DataFrame) -> pd.DataFrame:
+    lagged_features = [base_features.shift(lag).add_suffix(f"_lag_{lag}") for lag in range(0, 14)]
+    rolling_features = [
+        base_features.shift(1).rolling(window=window, min_periods=1).mean().add_suffix(f"_roll_{window}_mean")
+        for window in (3, 6)
+    ]
+
+    return pd.concat([base_features, *lagged_features, *rolling_features], axis=1).bfill()
+
+
 def load_data(city_id: str, feature_cols: list[str] | None = None) -> tuple[pd.DataFrame, pd.Series]:
-    train_features = pd.read_csv(DATA_DIR / "dengue_features_train.csv", index_col=[0, 1, 2])
+    train_features = pd.read_csv(DATA_DIR / "dengue_features_train.csv", index_col=[0, 1, 2], parse_dates=["week_start_date"])
     train_labels = pd.read_csv(DATA_DIR / "dengue_labels_train.csv", index_col=[0, 1, 2])
 
     train_features = train_features.loc[city_id].sort_index()
@@ -40,25 +52,32 @@ def load_data(city_id: str, feature_cols: list[str] | None = None) -> tuple[pd.D
     train_features = train_features.interpolate(method="linear", limit_direction="both")
     train_labels = train_labels["total_cases"]
 
-    base_features = train_features
-    lagged_features = [base_features.shift(lag).add_suffix(f"_lag_{lag}") for lag in range(0, 14)]
-    rolling_features = [
-        base_features.shift(1).rolling(window=window, min_periods=1).mean().add_suffix(f"_roll_{window}_mean")
-        for window in (3, 6)
-    ]
-    train_features = pd.concat([base_features, *lagged_features, *rolling_features], axis=1)
-    train_features = train_features.bfill()
+    train_features = make_lag_and_rolling_features(train_features)
 
     return train_features, train_labels
 
 
-def load_week_start_dates(city_id: str) -> pd.Series:
-    train_features = pd.read_csv(
-        DATA_DIR / "dengue_features_train.csv",
-        index_col=[0, 1, 2],
-        usecols=["city", "year", "weekofyear", "week_start_date"],
-    )
-    dates = pd.to_datetime(train_features.loc[city_id].sort_index()["week_start_date"])
+def load_test_data(city_id: str, feature_cols: list[str] | None = None) -> tuple[pd.DataFrame, pd.Series]:
+    test_features = pd.read_csv(DATA_DIR / "dengue_features_test.csv", parse_dates=["week_start_date"])
+    test_features = test_features.set_index(["city", "year", "weekofyear"]).loc[city_id].sort_index()
+
+    if feature_cols is not None:
+        test_features = test_features[feature_cols]
+
+    dates = test_features["week_start_date"]
+    dates.name = "week_start_date"
+
+    test_features = test_features.select_dtypes(include="number")
+    test_features = test_features.interpolate(method="linear", limit_direction="both")
+    test_features = make_lag_and_rolling_features(test_features)
+
+    return test_features, dates
+
+
+def load_week_start_dates(city_id: str, source: str = "train") -> pd.Series:
+    path = DATA_DIR / "dengue_features_train.csv" if source == "train" else DATA_DIR / "dengue_features_test.csv"
+    features = pd.read_csv(path, parse_dates=["week_start_date"], index_col=[0, 1, 2])
+    dates = pd.to_datetime(features.loc[city_id].sort_index()["week_start_date"])
     dates.name = "week_start_date"
 
     return dates
@@ -195,6 +214,74 @@ def plot_best_model_prediction(
     return output_path, final_mae
 
 
+def predict_submission_from_test(city_id: str, best_params: dict[str, object]) -> tuple[pd.Series, pd.Series]:
+    X_train, y_train = load_data(city_id)
+    X_test, test_dates = load_test_data(city_id)
+
+    model = build_model_from_params(best_params)
+    model.fit(X_train, y_train)
+    predictions = pd.Series(model.predict(X_test), index=X_test.index, name="total_cases")
+
+    if "city" not in predictions.reset_index().columns:
+        predictions.index = pd.MultiIndex.from_arrays(
+            [
+                [city_id] * len(predictions),
+                predictions.index.get_level_values("year"),
+                predictions.index.get_level_values("weekofyear"),
+            ],
+            names=["city", "year", "weekofyear"],
+        )
+
+    return predictions, test_dates
+
+
+def save_submission_predictions(predictions: pd.Series, output_path: Path = SUBMISSION_OUTPUT_PATH) -> Path:
+    submission_format = pd.read_csv(DATA_DIR / "submission_format.csv")
+    prediction_frame = predictions.reset_index()[["city", "year", "weekofyear", "total_cases"]]
+    submission = submission_format.drop(columns=["total_cases"]).merge(
+        prediction_frame,
+        on=["city", "year", "weekofyear"],
+        how="left",
+        validate="one_to_one",
+    )
+    submission = submission[["city", "year", "weekofyear", "total_cases"]]
+    submission.to_csv(output_path, index=False)
+
+    return output_path
+
+
+def plot_submission_prediction(
+    city_id: str,
+    best_params: dict[str, object],
+    output_dir: Path = PLOT_DIR,
+) -> Path:
+    X_train, y_train = load_data(city_id)
+    X_test, test_dates = load_test_data(city_id)
+
+    model = build_model_from_params(best_params)
+    model.fit(X_train, y_train)
+    prediction = model.predict(X_test)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{city_id}_final_submission_prediction.png"
+
+    train_dates = load_week_start_dates(city_id, source="train")
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(train_dates, y_train, label="Train labels", color="#1f2937")
+    ax.plot(test_dates, prediction, label="Final test prediction", color="#dc2626")
+    ax.axvline(test_dates.iloc[0], color="#6b7280", linestyle="--", linewidth=1)
+    ax.set_title(f"{city_id}: Test set submission prediction")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Total cases")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+    return output_path
+
+
 def main() -> None:
     study = optuna.create_study(
         study_name=STUDY_NAME,
@@ -202,8 +289,11 @@ def main() -> None:
         direction="minimize",
         load_if_exists=True,
     )
-    study.optimize(objective, n_trials=10)
+    # study.optimize(objective, n_trials=1)
     plot_path, final_mae = plot_best_model_prediction(CITY_ID, study.best_params)
+    submission_predictions, _ = predict_submission_from_test(CITY_ID, study.best_params)
+    submission_path = save_submission_predictions(submission_predictions)
+    submission_plot_path = plot_submission_prediction(CITY_ID, study.best_params)
 
     print("Study:", STUDY_NAME)
     print("SQLite backup:", DB_PATH)
@@ -211,7 +301,9 @@ def main() -> None:
     print("Best MAE:", round(study.best_value, 3))
     print("Best params:", study.best_params)
     print("Final holdout MAE:", round(final_mae, 3))
-    print("Final prediction plot:", plot_path)
+    print("Final holdout prediction plot:", plot_path)
+    print("Submission CSV:", submission_path)
+    print("Submission prediction plot:", submission_plot_path)
     print("\nDashboard:")
     print(f"optuna-dashboard {STORAGE}")
 
