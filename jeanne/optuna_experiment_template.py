@@ -23,9 +23,9 @@ DB_PATH = BASE_DIR / "optuna_forecasting.db"
 CODECARBON_DIR = BASE_DIR / "codecarbon_logs"
 PLOT_DIR = BASE_DIR / "optuna_plots"
 SUBMISSION_OUTPUT_PATH = BASE_DIR / "submission_prediction.csv"
-STUDY_NAME = "random_forest_forecasting_oliver_features"
 STORAGE = f"sqlite:///{DB_PATH}"
 CITY_ID = "iq"
+STUDY_NAME = "random_forest_forecasting_oliver_features_{}".format(CITY_ID)
 RANDOM_STATE = 7
 N_TRIALS = 50
 MERGE_KEYS = ["city", "year", "weekofyear"]
@@ -323,6 +323,12 @@ def build_model(trial: optuna.Trial) -> RandomForestRegressor:
     return build_model_from_params(params)
 
 
+def make_case_count_predictions(raw_predictions, index: pd.Index | None = None) -> pd.Series:
+    predictions = pd.Series(raw_predictions, index=index, name="total_cases")
+
+    return predictions.clip(lower=0).round().astype(int)
+
+
 def yearly_time_series_splits(X: pd.DataFrame):
     years = X.index.get_level_values("year").unique().sort_values()
 
@@ -397,7 +403,7 @@ def plot_best_model_prediction(
     model.fit(X.iloc[train_index], y.iloc[train_index])
     X_test = X.iloc[test_index]
     y_test = y.iloc[test_index]
-    prediction = model.predict(X_test)
+    prediction = make_case_count_predictions(model.predict(X_test), index=X_test.index)
     final_mae = float(mean_absolute_error(y_test, prediction))
     holdout_year = X_test.index.get_level_values("year").max()
 
@@ -441,7 +447,7 @@ def predict_submission_from_test(city_id: str, best_params: dict[str, object]) -
 
     model = build_model_from_params(best_params)
     model.fit(X_train, y_train)
-    predictions = pd.Series(model.predict(X_test), index=X_test.index, name="total_cases")
+    predictions = make_case_count_predictions(model.predict(X_test), index=X_test.index)
 
     if "city" not in predictions.reset_index().columns:
         predictions.index = pd.MultiIndex.from_arrays(
@@ -480,6 +486,7 @@ def save_submission_predictions(predictions: pd.Series, output_path: Path = SUBM
     submission["total_cases"] = submission[prediction_column].combine_first(submission["total_cases"])
     submission = submission.drop(columns=[prediction_column])
     submission = submission[["city", "year", "weekofyear", "total_cases"]]
+    submission["total_cases"] = make_case_count_predictions(submission["total_cases"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     submission.to_csv(output_path, index=False)
 
@@ -496,7 +503,7 @@ def plot_submission_prediction(
 
     model = build_model_from_params(best_params)
     model.fit(X_train, y_train)
-    prediction = model.predict(X_test)
+    prediction = make_case_count_predictions(model.predict(X_test), index=X_test.index)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{city_id}_final_submission_prediction.png"
