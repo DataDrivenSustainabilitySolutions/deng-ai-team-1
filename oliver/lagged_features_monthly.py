@@ -108,11 +108,6 @@ parser.add_argument(
     help="Filename for per-city feature-group monthly lag summaries. Default: feature_group_month_lag_summary.csv",
 )
 parser.add_argument(
-    "--target-autocorrelation-output",
-    default="target_monthly_autocorrelation.csv",
-    help="Filename for monthly target autocorrelation by city and lag. Default: target_monthly_autocorrelation.csv",
-)
-parser.add_argument(
     "--monthly-data-output",
     default="monthly_aggregated_data.csv",
     help="Filename for the aggregated monthly data used in the analysis. Default: monthly_aggregated_data.csv",
@@ -149,7 +144,6 @@ best_lags_path = output_dir / args.best_lags_output
 top_correlations_path = output_dir / args.top_correlations_output
 lag_summary_path = output_dir / args.lag_summary_output
 feature_group_summary_path = output_dir / args.feature_group_summary_output
-target_autocorrelation_path = output_dir / args.target_autocorrelation_output
 monthly_data_path = output_dir / args.monthly_data_output
 missing_summary_path = output_dir / args.missing_summary_output
 merge_keys = ["city", "year", "weekofyear"]
@@ -397,39 +391,6 @@ feature_group_summary = feature_group_summary.merge(
 )
 
 
-### 6. Monthly target autocorrelation
-target_autocorrelation_records = []
-for city, city_data in monthly_data.groupby("city", sort=False):
-    city_data = city_data.sort_values("month_start").reset_index(drop=True)
-    target = city_data["total_cases"]
-
-    for lag in range(1, args.max_lag + 1):
-        pair_data = pd.DataFrame(
-            {
-                "target": target,
-                "lagged_target": target.shift(lag),
-            }
-        ).dropna()
-
-        pearson_corr = float("nan")
-        if (
-            len(pair_data) >= args.min_pairs
-            and pair_data["target"].nunique() > 1
-            and pair_data["lagged_target"].nunique() > 1
-        ):
-            pearson_corr = pair_data["target"].corr(pair_data["lagged_target"])
-
-        target_autocorrelation_records.append(
-            {
-                "city": city,
-                "lag_months": lag,
-                "n_pairs": len(pair_data),
-                "pearson_corr": pearson_corr,
-                "abs_pearson_corr": abs(pearson_corr),
-            }
-        )
-
-target_autocorrelation = pd.DataFrame(target_autocorrelation_records)
 missing_summary = pd.DataFrame(
     {
         "feature": numeric_feature_columns,
@@ -451,7 +412,6 @@ best_lags.to_csv(best_lags_path, index=False)
 top_correlations.to_csv(top_correlations_path, index=False)
 lag_summary.to_csv(lag_summary_path, index=False)
 feature_group_summary.to_csv(feature_group_summary_path, index=False)
-target_autocorrelation.to_csv(target_autocorrelation_path, index=False)
 missing_summary.to_csv(missing_summary_path, index=False)
 
 
@@ -590,30 +550,6 @@ if not args.skip_plots:
         plt.close(figure)
         saved_plot_paths.append(plot_path)
 
-    if not target_autocorrelation.empty:
-        figure, axis = plt.subplots(figsize=(9, 5))
-        for city, city_autocorrelation in target_autocorrelation.groupby("city", sort=False):
-            city_autocorrelation = city_autocorrelation.sort_values("lag_months")
-            axis.plot(
-                city_autocorrelation["lag_months"],
-                city_autocorrelation["pearson_corr"],
-                marker="o",
-                linewidth=1.5,
-                label=city,
-            )
-        axis.set_title("Monthly target autocorrelation by city")
-        axis.set_xlabel("Lag months")
-        axis.set_ylabel("Pearson correlation")
-        axis.set_xticks(list(range(1, args.max_lag + 1)))
-        axis.grid(True, alpha=0.25)
-        axis.legend(title="city")
-        figure.tight_layout()
-
-        plot_path = output_dir / "target_monthly_autocorrelation.png"
-        figure.savefig(plot_path, dpi=args.plot_dpi)
-        plt.close(figure)
-        saved_plot_paths.append(plot_path)
-
 print("Monthly lagged feature analysis completed.")
 print(f"Cities analyzed: {', '.join(monthly_data['city'].drop_duplicates())}")
 print(f"Features analyzed: {len(numeric_feature_columns)}")
@@ -628,7 +564,6 @@ print(f"Saved best month lags by feature: {best_lags_path}")
 print(f"Saved top monthly lagged correlations by city: {top_correlations_path}")
 print(f"Saved month lag summary: {lag_summary_path}")
 print(f"Saved feature-group month lag summary: {feature_group_summary_path}")
-print(f"Saved monthly target autocorrelation: {target_autocorrelation_path}")
 if saved_plot_paths:
     print("Saved plots:")
     for plot_path in saved_plot_paths:
