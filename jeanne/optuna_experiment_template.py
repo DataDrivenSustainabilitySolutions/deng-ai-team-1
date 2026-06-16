@@ -4,34 +4,50 @@ import optuna
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error
+from sklearn.model_selection import TimeSeriesSplit
 
 from codecarbon import EmissionsTracker
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR.parent / "data"
 DB_PATH = BASE_DIR / "optuna_forecasting.db"
 CODECARBON_DIR = BASE_DIR / "codecarbon_logs"
 STUDY_NAME = "random_forest_forecasting_template"
 STORAGE = f"sqlite:///{DB_PATH}"
 
 
-def load_data(city_id: str, feature_cols: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    train_features = pd.read_csv(
-        "../data/dengue_features_train.csv", index_col=[0, 1, 2]
+def load_data(city_id: str, feature_cols: list[str] | None = None) -> tuple[pd.DataFrame, pd.Series]:
+    train_features = pd.read_csv(DATA_DIR / "dengue_features_train.csv", index_col=[0, 1, 2])
+    train_labels = pd.read_csv(DATA_DIR / "dengue_labels_train.csv", index_col=[0, 1, 2])
+
+    train_features = train_features.loc[city_id].sort_index()
+    train_labels = train_labels.loc[city_id].sort_index()
+
+    if feature_cols is not None:
+        train_features = train_features[feature_cols]
+
+    train_features = train_features.select_dtypes(include="number")
+    train_features = train_features.ffill().bfill()
+    train_labels = train_labels["total_cases"]
+
+    return train_features, train_labels
+
+
+def build_model(trial: optuna.Trial) -> RandomForestRegressor:
+    return RandomForestRegressor(
+        n_estimators=trial.suggest_int("n_estimators", 50, 400, step=50),
+        max_depth=trial.suggest_int("max_depth", 2, 16),
+        min_samples_leaf=trial.suggest_int("min_samples_leaf", 1, 12),
+        min_samples_split=trial.suggest_int("min_samples_split", 2, 20),
+        max_features=trial.suggest_categorical("max_features", ["sqrt", "log2", 1.0]),
+        bootstrap=trial.suggest_categorical("bootstrap", [True, False]),
+        n_jobs=-1,
     )
 
-    train_labels = pd.read_csv(
-        "../data/dengue_labels_train.csv", index_col=[0, 1, 2]
-    )
-    train_features = train_features.loc[city_id][feature_cols]
-    train_labels = train_labels.loc[city_id][feature_cols]
-
-    # TODO Cross Validation, Moving Window, etc.
-    valid = None
-
-    return train_features, train_labels, valid
 
 def objective(trial: optuna.Trial) -> float:
-    features, labels, valid = load_data("sj")
+    X, y = load_data("sj")
+    CODECARBON_DIR.mkdir(exist_ok=True)
     tracker = EmissionsTracker(
         project_name=STUDY_NAME,
         output_dir=str(CODECARBON_DIR),
@@ -42,25 +58,23 @@ def objective(trial: optuna.Trial) -> float:
     tracker.start()
 
     try:
-        model = RandomForestRegressor(
-            n_estimators=trial.suggest_int("n_estimators", 50, 400, step=50),
-            max_depth=trial.suggest_int("max_depth", 2, 16),
-            min_samples_leaf=trial.suggest_int("min_samples_leaf", 1, 12),
-            max_features=trial.suggest_categorical("max_features", ["sqrt", "log2", 1.0]),
-            bootstrap=trial.suggest_categorical("bootstrap", [True, False]),
-            random_state=7,
-            n_jobs=-1,
-        )
-        model.fit(features, labels)
+        fold_maes = []
+        tscv = TimeSeriesSplit(n_splits=5)
 
-        pred = model.predict(valid)
-        mae = mean_absolute_error(labels, pred)
-        return float(mae)
+        for fold, (train_index, test_index) in enumerate(tscv.split(X), start=1):
+            model = build_model(trial)
+            model.fit(X.iloc[train_index], y.iloc[train_index])
+
+            pred = model.predict(X.iloc[test_index])
+            mae = float(mean_absolute_error(y.iloc[test_index], pred))
+            fold_maes.append(mae)
+            trial.set_user_attr(f"fold_{fold}_mae", mae)
+
+        return float(sum(fold_maes) / len(fold_maes))
     finally:
-        if tracker is not None:
-            emissions_kg = tracker.stop()
-            trial.set_user_attr("emissions_kg_co2eq", emissions_kg)
-            trial.set_user_attr("codecarbon_csv", str(CODECARBON_DIR / f"trial_{trial.number}_emissions.csv"))
+        emissions_kg = tracker.stop()
+        trial.set_user_attr("emissions_kg_co2eq", emissions_kg)
+        trial.set_user_attr("codecarbon_csv", str(CODECARBON_DIR / f"trial_{trial.number}_emissions.csv"))
 
 
 def main() -> None:
