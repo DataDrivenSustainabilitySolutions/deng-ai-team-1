@@ -186,14 +186,14 @@ def plot_best_model_prediction(
             "date": dates.iloc[train_index],
             "total_cases": y.iloc[train_index],
         }
-    )
+    ).sort_values("date")
     test_data = pd.DataFrame(
         {
             "date": dates.iloc[test_index],
             "total_cases": y_test,
             "prediction": prediction,
         }
-    )
+    ).sort_values("date")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{city_id}_best_model_prediction.png"
@@ -266,11 +266,18 @@ def plot_submission_prediction(
     output_path = output_dir / f"{city_id}_final_submission_prediction.png"
 
     train_dates = load_week_start_dates(city_id, source="train")
+    first_test_date = test_dates.min()
+    train_mask = train_dates < first_test_date
+    train_dates = train_dates[train_mask]
+    y_train_plot = y_train.loc[train_mask]
+
+    train_plot = pd.DataFrame({"date": train_dates, "total_cases": y_train_plot}).sort_values("date")
+    test_plot = pd.DataFrame({"date": test_dates, "prediction": prediction}).sort_values("date")
 
     fig, ax = plt.subplots(figsize=(14, 6))
-    ax.plot(train_dates, y_train, label="Train labels", color="#1f2937")
-    ax.plot(test_dates, prediction, label="Final test prediction", color="#dc2626")
-    ax.axvline(test_dates.iloc[0], color="#6b7280", linestyle="--", linewidth=1)
+    ax.plot(train_plot["date"], train_plot["total_cases"], label="Train labels", color="#1f2937")
+    ax.plot(test_plot["date"], test_plot["prediction"], label="Final test prediction", color="#dc2626")
+    ax.axvline(first_test_date, color="#6b7280", linestyle="--", linewidth=1)
     ax.set_title(f"{city_id}: Test set submission prediction")
     ax.set_xlabel("Date")
     ax.set_ylabel("Total cases")
