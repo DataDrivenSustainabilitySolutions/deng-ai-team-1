@@ -133,6 +133,34 @@ parser.add_argument(
     default="best_params.csv",
     help="Filename for best per-city model parameters. Default: best_params.csv",
 )
+parser.add_argument(
+    "--skip-csv-previews",
+    action="store_true",
+    help="Skip PNG table previews for generated CSV outputs.",
+)
+parser.add_argument(
+    "--csv-preview-dir",
+    default="csv_previews",
+    help="Subdirectory under the output dir for CSV table preview PNGs. Default: csv_previews",
+)
+parser.add_argument(
+    "--csv-preview-max-rows",
+    type=int,
+    default=30,
+    help="Maximum rows shown in each CSV preview image. Default: 30",
+)
+parser.add_argument(
+    "--csv-preview-max-cols",
+    type=int,
+    default=12,
+    help="Maximum columns shown in each CSV preview image. Default: 12",
+)
+parser.add_argument(
+    "--csv-preview-dpi",
+    type=int,
+    default=150,
+    help="Resolution for CSV preview images. Default: 150",
+)
 args = parser.parse_args()
 
 try:
@@ -159,6 +187,7 @@ validation_predictions_path = output_dir / args.validation_predictions_output
 feature_importance_path = output_dir / args.feature_importance_output
 optuna_trials_path = output_dir / args.optuna_output
 best_params_path = output_dir / args.best_params_output
+csv_preview_dir = output_dir / args.csv_preview_dir
 merge_keys = ["city", "year", "weekofyear"]
 identifier_columns = {"city", "year", "weekofyear", "week_start_date", "split", "total_cases"}
 matplotlib_config_dir = output_dir / ".matplotlib"
@@ -178,6 +207,15 @@ if args.optuna_trials < 1:
 
 if args.optuna_timeout < 0:
     raise ValueError("--optuna-timeout must be non-negative.")
+
+if args.csv_preview_max_rows < 1:
+    raise ValueError("--csv-preview-max-rows must be at least 1.")
+
+if args.csv_preview_max_cols < 1:
+    raise ValueError("--csv-preview-max-cols must be at least 1.")
+
+if args.csv_preview_dpi < 1:
+    raise ValueError("--csv-preview-dpi must be at least 1.")
 
 if args.tune_hyperparameters:
     try:
@@ -290,24 +328,26 @@ for feature, lags in weather_lag_plan.items():
 
 
 ### 2.3 Rolling weather summaries
-# Rolling windows summarize delayed exposure instead of adding every single lag.
+# Cumulative weekly rolling means summarize recent exposure over the last N available weeks.
 weather_rolling_plan = {
-    "reanalysis_specific_humidity_g_per_kg": [(0, 4), (1, 3), (5, 4), (7, 4), (9, 4)],
-    "reanalysis_dew_point_temp_k": [(0, 4), (1, 3), (5, 4), (7, 4), (9, 4)],
-    "reanalysis_min_air_temp_k": [(0, 4), (1, 3), (5, 4), (7, 4), (9, 4)],
-    "station_avg_temp_c": [(1, 3), (5, 4), (7, 4), (9, 4)],
-    "station_min_temp_c": [(1, 3), (5, 4), (7, 4), (9, 4)],
-    "station_max_temp_c": [(5, 4), (7, 4), (9, 4)],
-    "precipitation_amt_mm": [(0, 4), (1, 3), (2, 4)],
-    "reanalysis_sat_precip_amt_mm": [(0, 4), (1, 3), (2, 4)],
+    "reanalysis_specific_humidity_g_per_kg": [3, 4, 6, 8, 10, 12, 14],
+    "reanalysis_dew_point_temp_k": [3, 4, 6, 8, 10, 12, 14],
+    "reanalysis_min_air_temp_k": [3, 4, 5, 6, 7, 8, 10, 12, 14],
+    "reanalysis_air_temp_k": [8, 10, 12, 14],
+    "reanalysis_avg_temp_k": [8, 10, 12, 14],
+    "reanalysis_max_air_temp_k": [8, 10, 12, 14],
+    "station_avg_temp_c": [3, 4, 5, 6, 8, 10, 12, 14],
+    "station_min_temp_c": [3, 4, 5, 6, 8, 10, 12, 14],
+    "station_max_temp_c": [5, 6, 8, 10, 12, 14],
+    "precipitation_amt_mm": [4, 7, 10, 14],
+    "reanalysis_sat_precip_amt_mm": [4, 7, 10, 14],
 }
 
-for feature, windows in weather_rolling_plan.items():
-    for start_lag, window in windows:
-        column = f"{feature}_lag_{start_lag}_{start_lag + window - 1}_mean"
-        shifted_feature = data.groupby("city", sort=False)[feature].shift(start_lag)
+for feature, rolling_windows in weather_rolling_plan.items():
+    for window in rolling_windows:
+        column = f"{feature}_rolling_{window}_mean"
         engineered_feature_data[column] = (
-            shifted_feature.groupby(data["city"], sort=False)
+            data.groupby("city", sort=False)[feature]
             .rolling(window=window, min_periods=1)
             .mean()
             .reset_index(level=0, drop=True)
@@ -316,8 +356,8 @@ for feature, windows in weather_rolling_plan.items():
 
 
 ### 2.4 Lagged target features
-# Target history is the strongest linear signal. Test rows only get values where past
-# labels are already known; later test target lags must be filled during recursive prediction.
+# Target history can only be used recursively. Validation and test rows are
+# filled week by week from known labels plus prior predictions.
 for target_lag in sorted(set(args.target_lags)):
     column = f"total_cases_lag_{target_lag}"
     engineered_feature_data[column] = data.groupby("city", sort=False)["total_cases"].shift(target_lag)
@@ -414,7 +454,7 @@ for city in ["sj", "iq"]:
             if feature in data.columns:
                 weather_feature_columns.append(feature)
             for column in engineered_feature_columns:
-                if column.startswith(f"{feature}_lag_"):
+                if column.startswith(f"{feature}_lag_") or column.startswith(f"{feature}_rolling_"):
                     weather_feature_columns.append(column)
 
     if city == "iq":
@@ -422,6 +462,26 @@ for city in ["sj", "iq"]:
         station_suffixes = ["lag_1", "lag_2", "lag_3", "lag_4", "lag_6", "lag_1_3_mean"]
         ndvi_suffixes = ["lag_10", "lag_11", "lag_14"]
         precip_suffixes = ["lag_2", "lag_3", "lag_0_3_mean", "lag_1_3_mean", "lag_2_5_mean"]
+        short_rolling_suffixes = [
+            "rolling_3_mean",
+            "rolling_4_mean",
+            "rolling_5_mean",
+            "rolling_6_mean",
+            "rolling_7_mean",
+            "rolling_8_mean",
+        ]
+        station_rolling_suffixes = [
+            "rolling_3_mean",
+            "rolling_4_mean",
+            "rolling_5_mean",
+            "rolling_6_mean",
+        ]
+        precip_rolling_suffixes = [
+            "rolling_4_mean",
+            "rolling_7_mean",
+            "rolling_10_mean",
+            "rolling_14_mean",
+        ]
 
         for feature in iq_weather_roots:
             if feature in data.columns:
@@ -436,9 +496,15 @@ for city in ["sj", "iq"]:
                     weather_feature_columns.append(column)
                 elif "precip" in feature and suffix in precip_suffixes:
                     weather_feature_columns.append(column)
+                elif "precip" in feature and suffix in precip_rolling_suffixes:
+                    weather_feature_columns.append(column)
                 elif feature.startswith("station_") and suffix in station_suffixes:
                     weather_feature_columns.append(column)
+                elif feature.startswith("station_") and suffix in station_rolling_suffixes:
+                    weather_feature_columns.append(column)
                 elif feature.startswith("reanalysis_") and suffix in short_lag_suffixes:
+                    weather_feature_columns.append(column)
+                elif feature.startswith("reanalysis_") and suffix in short_rolling_suffixes:
                     weather_feature_columns.append(column)
 
     selected_columns = seasonality_feature_columns + target_lag_feature_columns + weather_feature_columns
@@ -800,6 +866,111 @@ feature_importance.to_csv(feature_importance_path, index=False)
 submission.to_csv(submission_path, index=False)
 
 
+### 7. CSV content previews
+csv_preview_paths = []
+if not args.skip_csv_previews:
+    os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_config_dir))
+    csv_preview_dir.mkdir(parents=True, exist_ok=True)
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    csv_preview_outputs = [
+        ("missing_summary", missing_summary_path, missing_summary),
+        ("preprocessed_train", preprocessed_train_path, preprocessed_train),
+        ("preprocessed_test", preprocessed_test_path, preprocessed_test),
+        ("validation_scores", validation_scores_path, validation_scores),
+        ("validation_predictions", validation_predictions_path, validation_predictions),
+        ("feature_importance", feature_importance_path, feature_importance),
+        ("submission", submission_path, submission),
+    ]
+    if args.tune_hyperparameters:
+        csv_preview_outputs.extend(
+            [
+                ("optuna_trials", optuna_trials_path, optuna_trials),
+                ("best_params", best_params_path, best_params),
+            ]
+        )
+
+    for output_name, csv_path, csv_data in csv_preview_outputs:
+        preview_data = csv_data.copy()
+        original_rows, original_columns = preview_data.shape
+        preview_data = preview_data.iloc[
+            : args.csv_preview_max_rows,
+            : args.csv_preview_max_cols,
+        ].copy()
+
+        if preview_data.empty:
+            preview_data = pd.DataFrame({"message": [f"{csv_path.name} is empty"]})
+        else:
+            if original_columns > args.csv_preview_max_cols:
+                preview_data["..."] = f"+{original_columns - args.csv_preview_max_cols} columns"
+            if original_rows > args.csv_preview_max_rows:
+                overflow_row = {column: "" for column in preview_data.columns}
+                overflow_row[preview_data.columns[0]] = (
+                    f"... +{original_rows - args.csv_preview_max_rows} rows"
+                )
+                preview_data = pd.concat(
+                    [preview_data, pd.DataFrame([overflow_row])],
+                    ignore_index=True,
+                )
+
+        for column in preview_data.columns:
+            if pd.api.types.is_float_dtype(preview_data[column]):
+                preview_data[column] = preview_data[column].round(4)
+
+        preview_data = preview_data.where(pd.notna(preview_data), "")
+        preview_data = preview_data.astype(str)
+        preview_data = preview_data.apply(
+            lambda column: column.map(
+                lambda value: value if len(value) <= 32 else f"{value[:29]}..."
+            )
+        )
+
+        figure_width = min(24, max(8, len(preview_data.columns) * 1.45))
+        figure_height = min(28, max(3.2, (len(preview_data) + 2) * 0.32))
+        figure, axis = plt.subplots(figsize=(figure_width, figure_height))
+        axis.axis("off")
+        axis.set_title(
+            (
+                f"{csv_path.name} ({original_rows} rows x {original_columns} columns)\n"
+                f"Showing first {min(original_rows, args.csv_preview_max_rows)} rows "
+                f"and first {min(original_columns, args.csv_preview_max_cols)} columns"
+            ),
+            fontsize=11,
+            fontweight="bold",
+            pad=12,
+        )
+
+        table = axis.table(
+            cellText=preview_data.to_numpy(),
+            colLabels=preview_data.columns,
+            loc="center",
+            cellLoc="left",
+            colLoc="left",
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(6)
+        table.scale(1.0, 1.18)
+
+        for (row_index, _column_index), cell in table.get_celld().items():
+            cell.set_edgecolor("#d8dee9")
+            cell.set_linewidth(0.35)
+            if row_index == 0:
+                cell.set_facecolor("#eceff4")
+                cell.set_text_props(weight="bold", color="#2e3440")
+            elif row_index % 2 == 0:
+                cell.set_facecolor("#f8f9fb")
+
+        figure.tight_layout()
+        preview_path = csv_preview_dir / f"{output_name}.png"
+        figure.savefig(preview_path, dpi=args.csv_preview_dpi)
+        plt.close(figure)
+        csv_preview_paths.append(preview_path)
+
+
 print("Pipeline completed through preprocessing, feature engineering, validation, and submission.")
 print(f"Imported train rows: {len(train_data)}")
 print(f"Imported test rows: {len(test_data)}")
@@ -818,3 +989,7 @@ print(f"Saved validation scores: {validation_scores_path}")
 print(f"Saved validation predictions: {validation_predictions_path}")
 print(f"Saved feature importance: {feature_importance_path}")
 print(f"Saved submission: {submission_path}")
+if csv_preview_paths:
+    print("Saved CSV preview images:")
+    for csv_preview_path in csv_preview_paths:
+        print(f"- {csv_preview_path}")
