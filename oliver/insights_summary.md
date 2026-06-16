@@ -1,8 +1,8 @@
 # Current Modeling Insights
 
 ## Forecast-Relevant Signal
-- Do not treat lagged `total_cases` as a free test-time feature; future labels are unavailable.
-- Target autocorrelation is diagnostic only, unless modeled recursively with prior predictions.
+- `total_cases` is only the dependent variable / model target, never an input signal.
+- Exclude lagged, rolling, or autocorrelated `total_cases` from analysis and modeling.
 - Main usable signals are seasonality plus lagged/rolling weather, humidity, temperature, NDVI, and precipitation.
 
 ## City Differences
@@ -15,8 +15,7 @@
 - Add seasonality: `weekofyear_sin`, `weekofyear_cos`.
 - Add selected weather lags instead of every lag.
 - Add cumulative rolling weather means over the last `1..14` available weeks.
-- Use target lags only as an explicitly recursive autoregressive experiment.
-- Validate target-history features separately because prediction errors compound through the test horizon.
+- Keep feature engineering restricted to exogenous predictors available for both train and test rows.
 
 ## Rolling Feature Update
 - Rolling windows now mean cumulative current/past feature means: week `t` over the last `1..14` weeks.
@@ -28,4 +27,4 @@
 - These are only linear correlations, not proof of causal value.
 - Rolling windows can mostly duplicate seasonality and lag effects; validate before trusting them.
 - Validate features with strict forward time splits by city.
-- Next useful test: baseline vs lagged target vs lagged weather vs both.
+- Next useful test: baseline vs lagged weather vs rolling weather vs combined exogenous feature set.

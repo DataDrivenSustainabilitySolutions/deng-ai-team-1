@@ -7,7 +7,7 @@ Example:
 import argparse
 import math
 import os
-import time
+import random
 from pathlib import Path
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
@@ -66,13 +66,6 @@ parser.add_argument(
     "--missing-summary-output",
     default="missing_summary.csv",
     help="Filename for missing-value counts before and after preprocessing. Default: missing_summary.csv",
-)
-parser.add_argument(
-    "--target-lags",
-    type=int,
-    nargs="+",
-    default=[1, 2, 3, 4, 8, 12],
-    help="Past total_cases lags to engineer. Default: 1 2 3 4 8 12",
 )
 parser.add_argument(
     "--submission-output",
@@ -196,9 +189,6 @@ os.environ["MPLCONFIGDIR"] = str(matplotlib_config_dir)
 
 from sklearn.metrics import mean_absolute_error
 
-if any(target_lag < 1 for target_lag in args.target_lags):
-    raise ValueError("--target-lags must contain positive integers.")
-
 if not 1.0 < args.tweedie_variance_power < 2.0:
     raise ValueError("--tweedie-variance-power must be between 1 and 2 for Tweedie regression.")
 
@@ -216,6 +206,24 @@ if args.csv_preview_max_cols < 1:
 
 if args.csv_preview_dpi < 1:
     raise ValueError("--csv-preview-dpi must be at least 1.")
+
+random.seed(args.random_state)
+np.random.seed(args.random_state)
+os.environ["PYTHONHASHSEED"] = str(args.random_state)
+
+deterministic_lightgbm_params = {
+    "random_state": args.random_state,
+    "seed": args.random_state,
+    "data_random_seed": args.random_state,
+    "feature_fraction_seed": args.random_state,
+    "bagging_seed": args.random_state,
+    "drop_seed": args.random_state,
+    "extra_seed": args.random_state,
+    "deterministic": True,
+    "force_col_wise": True,
+    "n_jobs": 1,
+    "verbose": -1,
+}
 
 if args.tune_hyperparameters:
     try:
@@ -355,32 +363,6 @@ for feature, rolling_windows in weather_rolling_plan.items():
         engineered_feature_columns.append(column)
 
 
-### 2.4 Lagged target features
-# Target history can only be used recursively. Validation and test rows are
-# filled week by week from known labels plus prior predictions.
-for target_lag in sorted(set(args.target_lags)):
-    column = f"total_cases_lag_{target_lag}"
-    engineered_feature_data[column] = data.groupby("city", sort=False)["total_cases"].shift(target_lag)
-    engineered_feature_columns.append(column)
-
-for window in [2, 4, 8]:
-    shifted_target = data.groupby("city", sort=False)["total_cases"].shift(1)
-    mean_column = f"total_cases_lag_1_{window}_mean"
-    max_column = f"total_cases_lag_1_{window}_max"
-    engineered_feature_data[mean_column] = (
-        shifted_target.groupby(data["city"], sort=False)
-        .rolling(window=window, min_periods=1)
-        .mean()
-        .reset_index(level=0, drop=True)
-    )
-    engineered_feature_data[max_column] = (
-        shifted_target.groupby(data["city"], sort=False)
-        .rolling(window=window, min_periods=1)
-        .max()
-        .reset_index(level=0, drop=True)
-    )
-    engineered_feature_columns.extend([mean_column, max_column])
-
 data = pd.concat([data, pd.DataFrame(engineered_feature_data, index=data.index)], axis=1)
 
 
@@ -412,9 +394,6 @@ preprocessed_test.to_csv(preprocessed_test_path, index=False)
 
 
 ### 3. Model feature sets
-target_lag_feature_columns = [
-    column for column in engineered_feature_columns if column.startswith("total_cases_lag_")
-]
 seasonality_feature_columns = ["weekofyear_sin", "weekofyear_cos"]
 
 sj_weather_roots = [
@@ -507,7 +486,7 @@ for city in ["sj", "iq"]:
                 elif feature.startswith("reanalysis_") and suffix in short_rolling_suffixes:
                     weather_feature_columns.append(column)
 
-    selected_columns = seasonality_feature_columns + target_lag_feature_columns + weather_feature_columns
+    selected_columns = seasonality_feature_columns + weather_feature_columns
     city_feature_columns[city] = list(dict.fromkeys(selected_columns))
 
 
@@ -523,16 +502,12 @@ base_model_params = {
     "colsample_bytree": 0.9,
     "reg_alpha": 0.1,
     "reg_lambda": 1.0,
-    "random_state": args.random_state,
-    "verbose": -1,
+    **deterministic_lightgbm_params,
 }
 city_model_params = {
     city: base_model_params.copy()
     for city in ["sj", "iq"]
 }
-
-target_lags = sorted(set(args.target_lags))
-target_rolling_windows = [2, 4, 8]
 
 train_model_data = data[data["split"] == "train"].copy()
 test_model_data = data[data["split"] == "test"].copy()
@@ -559,13 +534,8 @@ if args.tune_hyperparameters:
             sampler=sampler,
             study_name=f"{city}_lightgbm_tweedie",
         )
-        city_tuning_start = time.monotonic()
 
-        for _ in range(args.optuna_trials):
-            if args.optuna_timeout > 0 and time.monotonic() - city_tuning_start >= args.optuna_timeout:
-                break
-
-            trial = study.ask()
+        def objective(trial):
             trial_params = {
                 "objective": "tweedie",
                 "n_estimators": trial.suggest_int("n_estimators", 100, 800, step=50),
@@ -578,78 +548,50 @@ if args.tune_hyperparameters:
                 "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 5.0, log=True),
                 "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
                 "tweedie_variance_power": trial.suggest_float("tweedie_variance_power", 1.1, 1.8),
-                "random_state": args.random_state,
-                "verbose": -1,
+                **deterministic_lightgbm_params,
             }
             trial_fold_maes = []
 
-            try:
-                for validation_year in validation_years:
-                    fold_train_data = city_train_data[city_train_data["year"] < validation_year].copy()
-                    fold_validation_data = city_train_data[city_train_data["year"] == validation_year].copy()
+            for validation_year in validation_years:
+                fold_train_data = city_train_data[city_train_data["year"] < validation_year].copy()
+                fold_validation_data = city_train_data[city_train_data["year"] == validation_year].copy()
 
-                    model = LGBMRegressor(**trial_params)
-                    model.fit(
-                        fold_train_data[feature_columns],
-                        fold_train_data["total_cases"],
-                    )
+                model = LGBMRegressor(**trial_params)
+                model.fit(
+                    fold_train_data[feature_columns],
+                    fold_train_data["total_cases"],
+                )
 
-                    target_history = fold_train_data["total_cases"].astype(float).tolist()
-                    fold_predictions = []
+                raw_predictions = model.predict(fold_validation_data[feature_columns])
+                fold_predictions = [
+                    int(round(max(0.0, float(raw_prediction))))
+                    for raw_prediction in raw_predictions
+                ]
 
-                    for row in fold_validation_data.itertuples(index=False):
-                        feature_row = fold_validation_data.loc[
-                            fold_validation_data["week_start_date"] == row.week_start_date,
-                            feature_columns,
-                        ].iloc[0].copy()
+                fold_mae = mean_absolute_error(fold_validation_data["total_cases"], fold_predictions)
+                trial_fold_maes.append(fold_mae)
 
-                        for target_lag in target_lags:
-                            column = f"total_cases_lag_{target_lag}"
-                            feature_row[column] = (
-                                target_history[-target_lag]
-                                if len(target_history) >= target_lag
-                                else np.nan
-                            )
+            return float(np.mean(trial_fold_maes))
 
-                        for window in target_rolling_windows:
-                            recent_targets = target_history[-window:]
-                            mean_column = f"total_cases_lag_1_{window}_mean"
-                            max_column = f"total_cases_lag_1_{window}_max"
-                            feature_row[mean_column] = (
-                                float(np.mean(recent_targets)) if recent_targets else np.nan
-                            )
-                            feature_row[max_column] = (
-                                float(np.max(recent_targets)) if recent_targets else np.nan
-                            )
+        study.optimize(
+            objective,
+            n_trials=args.optuna_trials,
+            timeout=args.optuna_timeout or None,
+            catch=(Exception,),
+            n_jobs=1,
+        )
 
-                        raw_prediction = float(
-                            model.predict(pd.DataFrame([feature_row], columns=feature_columns))[0]
-                        )
-                        clipped_prediction = max(0.0, raw_prediction)
-                        integer_prediction = int(round(clipped_prediction))
-
-                        target_history.append(float(integer_prediction))
-                        fold_predictions.append(integer_prediction)
-
-                    fold_mae = mean_absolute_error(fold_validation_data["total_cases"], fold_predictions)
-                    trial_fold_maes.append(fold_mae)
-
-                trial_mae = float(np.mean(trial_fold_maes))
-                study.tell(trial, trial_mae)
-                trial_state = "COMPLETE"
-                trial_value = trial_mae
-            except Exception:
-                study.tell(trial, state=optuna.trial.TrialState.FAIL)
-                trial_state = "FAIL"
-                trial_value = np.nan
-
+        for trial in study.trials:
             optuna_trial_records.append(
                 {
                     "city": city,
                     "trial_number": trial.number,
-                    "state": trial_state,
-                    "mae": trial_value,
-                    **trial_params,
+                    "state": trial.state.name,
+                    "mae": trial.value if trial.value is not None else np.nan,
+                    "objective": "tweedie",
+                    **trial.params,
+                    "subsample_freq": 1,
+                    **deterministic_lightgbm_params,
                 }
             )
 
@@ -662,8 +604,7 @@ if args.tune_hyperparameters:
                 "objective": "tweedie",
                 **study.best_params,
                 "subsample_freq": 1,
-                "random_state": args.random_state,
-                "verbose": -1,
+                **deterministic_lightgbm_params,
             }
             city_model_params[city] = best_params
             best_param_records.append(
@@ -710,34 +651,15 @@ for city, city_train_data in train_model_data.groupby("city", sort=False):
             fold_train_data["total_cases"],
         )
 
-        target_history = fold_train_data["total_cases"].astype(float).tolist()
         fold_predictions = []
-        fold_raw_predictions = []
+        raw_predictions = model.predict(fold_validation_data[feature_columns])
 
-        for row in fold_validation_data.itertuples(index=False):
-            feature_row = fold_validation_data.loc[
-                fold_validation_data["week_start_date"] == row.week_start_date,
-                feature_columns,
-            ].iloc[0].copy()
-
-            for target_lag in target_lags:
-                column = f"total_cases_lag_{target_lag}"
-                feature_row[column] = target_history[-target_lag] if len(target_history) >= target_lag else np.nan
-
-            for window in target_rolling_windows:
-                recent_targets = target_history[-window:]
-                mean_column = f"total_cases_lag_1_{window}_mean"
-                max_column = f"total_cases_lag_1_{window}_max"
-                feature_row[mean_column] = float(np.mean(recent_targets)) if recent_targets else np.nan
-                feature_row[max_column] = float(np.max(recent_targets)) if recent_targets else np.nan
-
-            raw_prediction = float(model.predict(pd.DataFrame([feature_row], columns=feature_columns))[0])
+        for row, raw_prediction in zip(fold_validation_data.itertuples(index=False), raw_predictions):
+            raw_prediction = float(raw_prediction)
             clipped_prediction = max(0.0, raw_prediction)
             integer_prediction = int(round(clipped_prediction))
 
-            target_history.append(float(integer_prediction))
             fold_predictions.append(integer_prediction)
-            fold_raw_predictions.append(clipped_prediction)
 
             validation_prediction_records.append(
                 {
@@ -808,30 +730,13 @@ for city, city_train_data in train_model_data.groupby("city", sort=False):
             }
         )
 
-    target_history = city_train_data["total_cases"].astype(float).tolist()
+    raw_predictions = model.predict(city_test_data[feature_columns])
 
-    for row in city_test_data.itertuples(index=False):
-        feature_row = city_test_data.loc[
-            city_test_data["week_start_date"] == row.week_start_date,
-            feature_columns,
-        ].iloc[0].copy()
-
-        for target_lag in target_lags:
-            column = f"total_cases_lag_{target_lag}"
-            feature_row[column] = target_history[-target_lag] if len(target_history) >= target_lag else np.nan
-
-        for window in target_rolling_windows:
-            recent_targets = target_history[-window:]
-            mean_column = f"total_cases_lag_1_{window}_mean"
-            max_column = f"total_cases_lag_1_{window}_max"
-            feature_row[mean_column] = float(np.mean(recent_targets)) if recent_targets else np.nan
-            feature_row[max_column] = float(np.max(recent_targets)) if recent_targets else np.nan
-
-        raw_prediction = float(model.predict(pd.DataFrame([feature_row], columns=feature_columns))[0])
+    for row, raw_prediction in zip(city_test_data.itertuples(index=False), raw_predictions):
+        raw_prediction = float(raw_prediction)
         clipped_prediction = max(0.0, raw_prediction)
         integer_prediction = int(round(clipped_prediction))
 
-        target_history.append(float(integer_prediction))
         submission_predictions[(row.city, row.year, row.weekofyear)] = integer_prediction
 
 submission["total_cases"] = [

@@ -3,3 +3,4 @@ outputs/.matplotlib/fontlist-v390.json
 oliver/outputs/visualization/.matplotlib/fontlist-v390.json
 *.pyc
 /oliver/outputs/rolling_features_monthly/.matplotlib
+/oliver/outputs/main/.matplotlib

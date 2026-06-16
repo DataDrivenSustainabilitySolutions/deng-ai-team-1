@@ -108,11 +108,6 @@ parser.add_argument(
     help="Filename for per-city feature-group lag summaries. Default: feature_group_lag_summary.csv",
 )
 parser.add_argument(
-    "--target-autocorrelation-output",
-    default="target_autocorrelation.csv",
-    help="Filename for target autocorrelation by city and lag. Default: target_autocorrelation.csv",
-)
-parser.add_argument(
     "--missing-summary-output",
     default="missing_summary.csv",
     help="Filename for missing-value counts before and after interpolation. Default: missing_summary.csv",
@@ -144,7 +139,6 @@ best_lags_path = output_dir / args.best_lags_output
 top_correlations_path = output_dir / args.top_correlations_output
 lag_summary_path = output_dir / args.lag_summary_output
 feature_group_summary_path = output_dir / args.feature_group_summary_output
-target_autocorrelation_path = output_dir / args.target_autocorrelation_output
 missing_summary_path = output_dir / args.missing_summary_output
 merge_keys = ["city", "year", "weekofyear"]
 identifier_columns = {"city", "year", "weekofyear", "week_start_date", "total_cases"}
@@ -360,40 +354,6 @@ feature_group_summary = feature_group_summary.merge(
 )
 
 
-### 6. Target autocorrelation
-# If total_cases itself is highly autocorrelated, lagged case features may be important later.
-target_autocorrelation_records = []
-for city, city_data in data.groupby("city", sort=False):
-    city_data = city_data.sort_values("week_start_date").reset_index(drop=True)
-    target = city_data["total_cases"]
-
-    for lag in range(1, args.max_lag + 1):
-        pair_data = pd.DataFrame(
-            {
-                "target": target,
-                "lagged_target": target.shift(lag),
-            }
-        ).dropna()
-
-        pearson_corr = float("nan")
-        if (
-            len(pair_data) >= args.min_pairs
-            and pair_data["target"].nunique() > 1
-            and pair_data["lagged_target"].nunique() > 1
-        ):
-            pearson_corr = pair_data["target"].corr(pair_data["lagged_target"])
-
-        target_autocorrelation_records.append(
-            {
-                "city": city,
-                "lag_weeks": lag,
-                "n_pairs": len(pair_data),
-                "pearson_corr": pearson_corr,
-                "abs_pearson_corr": abs(pearson_corr),
-            }
-        )
-
-target_autocorrelation = pd.DataFrame(target_autocorrelation_records)
 missing_summary = pd.DataFrame(
     {
         "feature": numeric_feature_columns,
@@ -410,7 +370,6 @@ best_lags.to_csv(best_lags_path, index=False)
 top_correlations.to_csv(top_correlations_path, index=False)
 lag_summary.to_csv(lag_summary_path, index=False)
 feature_group_summary.to_csv(feature_group_summary_path, index=False)
-target_autocorrelation.to_csv(target_autocorrelation_path, index=False)
 missing_summary.to_csv(missing_summary_path, index=False)
 
 
@@ -549,30 +508,6 @@ if not args.skip_plots:
         plt.close(figure)
         saved_plot_paths.append(plot_path)
 
-    if not target_autocorrelation.empty:
-        figure, axis = plt.subplots(figsize=(9, 5))
-        for city, city_autocorrelation in target_autocorrelation.groupby("city", sort=False):
-            city_autocorrelation = city_autocorrelation.sort_values("lag_weeks")
-            axis.plot(
-                city_autocorrelation["lag_weeks"],
-                city_autocorrelation["pearson_corr"],
-                marker="o",
-                linewidth=1.5,
-                label=city,
-            )
-        axis.set_title("Target autocorrelation by city")
-        axis.set_xlabel("Lag weeks")
-        axis.set_ylabel("Pearson correlation")
-        axis.set_xticks(list(range(1, args.max_lag + 1)))
-        axis.grid(True, alpha=0.25)
-        axis.legend(title="city")
-        figure.tight_layout()
-
-        plot_path = output_dir / "target_autocorrelation.png"
-        figure.savefig(plot_path, dpi=args.plot_dpi)
-        plt.close(figure)
-        saved_plot_paths.append(plot_path)
-
 print("Lagged feature analysis completed.")
 print(f"Cities analyzed: {', '.join(data['city'].drop_duplicates())}")
 print(f"Features analyzed: {len(numeric_feature_columns)}")
@@ -584,7 +519,6 @@ print(f"Saved best lags by feature: {best_lags_path}")
 print(f"Saved top lagged correlations by city: {top_correlations_path}")
 print(f"Saved lag summary: {lag_summary_path}")
 print(f"Saved feature-group lag summary: {feature_group_summary_path}")
-print(f"Saved target autocorrelation: {target_autocorrelation_path}")
 if saved_plot_paths:
     print("Saved plots:")
     for plot_path in saved_plot_paths:
