@@ -1,0 +1,5 @@
+city,iteration,blend_member,feature,importance_gain,importance_split
+iq,01_calendar_l1_raw,,weekofyear_cos,1289.6463525380332,1424
+iq,01_calendar_l1_raw,,weekofyear_sin,1154.6069046965604,2496
+sj,01_calendar_l1_raw,,weekofyear_sin,3996.936088469345,2761
+sj,01_calendar_l1_raw,,weekofyear_cos,2075.2614237330854,1413

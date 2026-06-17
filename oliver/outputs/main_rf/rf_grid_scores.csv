@@ -1,0 +1,17 @@
+city,grid_index,mae,selected,bootstrap,max_depth,max_features,min_samples_leaf,n_estimators,random_state,n_jobs
+sj,0,32.796875,False,True,8.0,sqrt,1,300,42,1
+sj,1,31.849759615384617,True,True,8.0,sqrt,3,300,42,1
+sj,2,33.26923076923077,False,True,8.0,0.7,1,300,42,1
+sj,3,32.74158653846154,False,True,8.0,0.7,3,300,42,1
+sj,4,32.80528846153846,False,True,,sqrt,1,300,42,1
+sj,5,32.06610576923077,False,True,,sqrt,3,300,42,1
+sj,6,33.70072115384615,False,True,,0.7,1,300,42,1
+sj,7,33.03846153846154,False,True,,0.7,3,300,42,1
+iq,0,8.58173076923077,False,True,8.0,sqrt,1,300,42,1
+iq,1,8.365384615384615,False,True,8.0,sqrt,3,300,42,1
+iq,2,9.103365384615383,False,True,8.0,0.7,1,300,42,1
+iq,3,8.692307692307692,False,True,8.0,0.7,3,300,42,1
+iq,4,8.55048076923077,False,True,,sqrt,1,300,42,1
+iq,5,8.30528846153846,True,True,,sqrt,3,300,42,1
+iq,6,9.153846153846153,False,True,,0.7,1,300,42,1
+iq,7,8.73798076923077,False,True,,0.7,3,300,42,1

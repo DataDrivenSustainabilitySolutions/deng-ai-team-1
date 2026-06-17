@@ -1,0 +1,7 @@
+city,loss,objective,selection_mode,n_trials,mae,selected
+sj,tweedie,tweedie,default_params,0,27.359375,False
+sj,poisson,poisson,default_params,0,28.014423076923077,False
+sj,l1,regression_l1,default_params,0,25.455528846153847,True
+iq,tweedie,tweedie,default_params,0,8.346153846153847,False
+iq,poisson,poisson,default_params,0,8.26201923076923,False
+iq,l1,regression_l1,default_params,0,7.235576923076923,True

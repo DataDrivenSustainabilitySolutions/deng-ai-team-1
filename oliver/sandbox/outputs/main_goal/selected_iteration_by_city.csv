@@ -1,0 +1,3 @@
+iteration,feature_set,loss,target_transform,log_component_weight,city,validation_year,train_rows,validation_rows,feature_count,mae,selection_mae
+01_calendar_l1_raw,calendar,l1,none,0.0,sj,all,,832,2,23.61778846153846,23.61778846153846
+01_calendar_l1_raw,calendar,l1,none,0.0,iq,all,,416,2,7.201923076923077,7.201923076923077

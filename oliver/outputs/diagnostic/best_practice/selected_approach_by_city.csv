@@ -1,0 +1,3 @@
+city,selected_candidate,selected_label,selected_uses_weather,selected_validation_mae,selected_selection_mae,validation_best_candidate,validation_best_mae,calendar_mae,weather_risk_margin
+sj,calendar_l1_raw,Calendar-only L1 baseline,False,23.61778846153846,23.61778846153846,calendar_broad_log_blend,23.537259615384617,23.61778846153846,0.25
+iq,calendar_l1_raw,Calendar-only L1 baseline,False,7.201923076923077,7.201923076923077,calendar_broad_log_blend,7.105769230769231,7.201923076923077,0.25

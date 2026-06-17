@@ -1,0 +1,3 @@
+iteration,model_type,city,validation_year,train_rows,validation_rows,all_year_mae,recent_validation_years,recent_mae,recent_score_weight,selection_mae
+a47_sj_quantile_lgbm_frontier_blend,blend,sj,all,,832,22.41346153846154,4,16.610576923076923,0.3,20.672596153846154
+a46_iq_lgbm_rf_frontier_blend,blend,iq,all,,416,6.8076923076923075,4,6.403846153846154,0.3,6.686538461538461
