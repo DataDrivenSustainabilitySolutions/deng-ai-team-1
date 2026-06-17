@@ -1,11 +1,11 @@
 """
 Example:
-    python3 matthias/sarimax.py
-    python3 matthias/sarimax.py --order 1 1 1 --fourier-harmonics 2
+    python3 matthias/sarimax_seasonal.py
+    python3 matthias/sarimax_seasonal.py --order 1 0 1 --seasonal-order 1 1 1 52
+    python3 matthias/sarimax_seasonal.py --order 2 0 2 --seasonal-order 1 1 0 52
 """
 
 import argparse
-import math
 import warnings
 from pathlib import Path
 
@@ -21,7 +21,7 @@ default_main_dir = Path("../oliver/outputs/main")
 
 ### CLI arguments
 parser = argparse.ArgumentParser(
-    description="Fit per-city SARIMAX models on main.py's engineered features."
+    description="Fit per-city SARIMAX models with native seasonal orders (no Fourier terms)."
 )
 parser.add_argument(
     "--train-csv",
@@ -43,7 +43,7 @@ parser.add_argument(
 parser.add_argument(
     "--output-dir",
     default=str(default_output_dir),
-    help=f"Directory for generated outputs. Default: oliver/outputs/{script_name}",
+    help=f"Directory for generated outputs. Default: matthias/outputs/{script_name}",
 )
 parser.add_argument(
     "--submission-output", default="submission.csv",
@@ -58,13 +58,13 @@ parser.add_argument(
     help="Filename for row-level validation predictions. Default: validation_predictions.csv",
 )
 parser.add_argument(
-    "--order", type=int, nargs=3, metavar=("P", "D", "Q"), default=[2, 0, 1],
-    help="Non-seasonal SARIMAX order (p d q). Default: 2 0 1",
+    "--order", type=int, nargs=3, metavar=("P", "D", "Q"), default=[1, 0, 1],
+    help="Non-seasonal ARIMA order (p d q). Default: 1 0 1",
 )
 parser.add_argument(
-    "--fourier-harmonics", type=int, default=3,
-    help="Number of Fourier harmonic pairs for the 52-week season. "
-    "Use 1 to match main.py's single sin/cos pair. Default: 3",
+    "--seasonal-order", type=int, nargs=4, metavar=("P", "D", "Q", "S"),
+    default=[1, 1, 1, 52],
+    help="Seasonal ARIMA order (P D Q S). Default: 1 1 1 52",
 )
 parser.add_argument(
     "--maxiter", type=int, default=200,
@@ -76,8 +76,7 @@ try:
     from statsmodels.tsa.statespace.sarimax import SARIMAX
 except ImportError as error:
     raise ImportError(
-        "statsmodels is required for the SARIMAX pipeline. Install it, e.g.: "
-        "python3 -m pip install statsmodels"
+        "statsmodels is required. Install with: python3 -m pip install statsmodels"
     ) from error
 
 
@@ -90,24 +89,19 @@ submission_path = output_dir / args.submission_output
 validation_scores_path = output_dir / args.validation_output
 validation_predictions_path = output_dir / args.validation_predictions_output
 merge_keys = ["city", "year", "weekofyear"]
-SEASONAL_PERIOD = 52.0
 sarimax_order = tuple(args.order)
+sarimax_seasonal_order = tuple(args.seasonal_order)
 
-if args.fourier_harmonics < 1:
-    raise ValueError("--fourier-harmonics must be at least 1.")
 if args.maxiter < 1:
     raise ValueError("--maxiter must be at least 1.")
+if sarimax_seasonal_order[3] < 1:
+    raise ValueError("Seasonal period S must be at least 1.")
 
-# Compact, biologically motivated exogenous subsets, drawn from the engineered
-# columns main.py produces. San Juan leans on longer (6-12 week) temperature and
-# humidity signals; Iquitos on shorter-lag humidity / dew point / min temperature.
-# Edit these freely - any column present in the preprocessed CSV may be used.
+# Exogenous climate feature subsets per city.
+# Features are standardised before fitting; any column in the preprocessed CSV is valid.
 city_climate_exog = {
-    # Features selected from XGBoost importance ranking (importance_gain, top features per city).
-    # Fourier sin/cos are generated separately; weekofyear_sin/cos are excluded here.
-    # Features are grouped by signal type for readability; order does not matter.
     "sj": [
-        # Temperature -- long lags and wide rolling windows dominate SJ importance
+        # Temperature
         "station_avg_temp_c_lag_12",
         "station_avg_temp_c_lag_2",
         "station_avg_temp_c_lag_6",
@@ -121,7 +115,7 @@ city_climate_exog = {
         "reanalysis_max_air_temp_k_rolling_12_mean",
         "reanalysis_min_air_temp_k_rolling_14_mean",
         "reanalysis_air_temp_k_rolling_8_mean",
-        # Humidity / dew point -- multiple lags and rolling windows all rank highly
+        # Humidity / dew point
         "reanalysis_dew_point_temp_k_lag_10",
         "reanalysis_dew_point_temp_k_lag_3",
         "reanalysis_dew_point_temp_k_lag_5",
@@ -132,11 +126,10 @@ city_climate_exog = {
         "reanalysis_specific_humidity_g_per_kg_lag_3",
         "reanalysis_specific_humidity_g_per_kg_lag_12",
         "reanalysis_specific_humidity_g_per_kg_rolling_12_mean",
-        # Relative humidity -- ranked mid-table but epidemiologically important
         "reanalysis_relative_humidity_percent",
     ],
     "iq": [
-        # Temperature -- rolling means at short windows matter most for IQ
+        # Temperature
         "reanalysis_min_air_temp_k_rolling_7_mean",
         "reanalysis_min_air_temp_k_rolling_5_mean",
         "reanalysis_min_air_temp_k_rolling_8_mean",
@@ -152,14 +145,14 @@ city_climate_exog = {
         "station_max_temp_c_lag_6",
         "station_min_temp_c_lag_6",
         "station_min_temp_c_lag_1",
-        # NDVI / vegetation -- top signal for IQ, completely absent before
+        # NDVI / vegetation
         "ndvi_sw_lag_11",
         "ndvi_sw_lag_10",
         "ndvi_sw_lag_14",
         "ndvi_nw_lag_14",
         "ndvi_nw_lag_10",
         "ndvi_nw",
-        # Precipitation -- strong signal for IQ (standing water -> mosquito breeding)
+        # Precipitation
         "reanalysis_precip_amt_kg_per_m2",
         "precipitation_amt_mm_rolling_7_mean",
         "precipitation_amt_mm_lag_3",
@@ -172,10 +165,9 @@ city_climate_exog = {
 }
 
 
-
 ### Data import
 train_data = pd.read_csv(train_csv_path, parse_dates=["week_start_date"])
-test_data = pd.read_csv(test_csv_path, parse_dates=["week_start_date"])
+test_data  = pd.read_csv(test_csv_path,  parse_dates=["week_start_date"])
 submission_format = pd.read_csv(submission_format_path)
 
 for required in merge_keys + ["week_start_date"]:
@@ -186,28 +178,15 @@ if "total_cases" not in train_data.columns:
 
 
 ### Helpers
-def fourier_terms(weekofyear, harmonics):
-    """Sine/cosine pairs for the annual cycle: columns fourier_sin_k / fourier_cos_k."""
-    angle = 2.0 * math.pi * np.asarray(weekofyear, dtype=float) / SEASONAL_PERIOD
-    out = {}
-    for k in range(1, harmonics + 1):
-        out[f"fourier_sin_{k}"] = np.sin(k * angle)
-        out[f"fourier_cos_{k}"] = np.cos(k * angle)
-    return pd.DataFrame(out)
-
-
-def build_exog(df, climate_columns, harmonics):
-    """Assemble the exogenous matrix (Fourier season + climate subset) for df."""
-    fourier = fourier_terms(df["weekofyear"].to_numpy(), harmonics)
-    fourier.index = df.index
-    climate = df[climate_columns].copy()
-    return pd.concat([fourier, climate], axis=1)
+def build_exog(df, climate_columns):
+    """Return the exogenous matrix: just the climate feature subset."""
+    return df[climate_columns].copy()
 
 
 def standardise(train_exog, *other_exog):
     """Z-score using train statistics; fill residual NaNs with 0 (the train mean)."""
     mean = train_exog.mean(axis=0)
-    std = train_exog.std(axis=0).replace(0.0, 1.0)
+    std  = train_exog.std(axis=0).replace(0.0, 1.0)
     scaled = [((train_exog - mean) / std).fillna(0.0)]
     for exog in other_exog:
         scaled.append(((exog - mean) / std).fillna(0.0))
@@ -216,19 +195,22 @@ def standardise(train_exog, *other_exog):
 
 def seasonal_naive(train_df, target_weeks):
     """Fallback: predict the training week-of-year mean for each target week."""
-    print("Fallback!")
-    woy_mean = train_df.groupby("weekofyear")["total_cases"].mean()
+    print("  Fallback to seasonal-naive!")
+    woy_mean    = train_df.groupby("weekofyear")["total_cases"].mean()
     global_mean = train_df["total_cases"].mean()
     return target_weeks.map(woy_mean).fillna(global_mean).to_numpy()
 
 
 def finalize(raw_values):
-    """Clip at 0, round to integer - matching main.py's submission convention."""
-    return [int(round(max(0.0, float(value)))) for value in raw_values]
+    """Clip at 0 and round to integer."""
+    return [int(round(max(0.0, float(v)))) for v in raw_values]
 
 
 def fit_forecast(y_log_train, exog_train, exog_future, n_steps):
-    """Fit SARIMAX on log1p target and return expm1 forecasts; None on failure."""
+    """Fit SARIMAX on log1p(cases) and return expm1 forecasts; None on failure."""
+    # Use a constant trend only when there is no non-seasonal differencing,
+    # to avoid over-parameterising an already-differenced series.
+    trend = "c" if sarimax_order[1] == 0 and sarimax_seasonal_order[1] == 0 else "n"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
@@ -236,8 +218,8 @@ def fit_forecast(y_log_train, exog_train, exog_future, n_steps):
                 y_log_train.to_numpy(),
                 exog=exog_train.to_numpy(),
                 order=sarimax_order,
-                seasonal_order=(0, 0, 0, 0),
-                trend="c" if sarimax_order[1] == 0 else "n",
+                seasonal_order=sarimax_seasonal_order,
+                trend=trend,
                 enforce_stationarity=False,
                 enforce_invertibility=False,
             )
@@ -246,25 +228,26 @@ def fit_forecast(y_log_train, exog_train, exog_future, n_steps):
                 steps=n_steps, exog=exog_future.to_numpy()
             ).predicted_mean
             return np.expm1(np.asarray(forecast_log, dtype=float))
-        except Exception:
+        except Exception as exc:
+            print(f"  SARIMAX fit/forecast failed: {exc}")
             return None
 
 
 def validation_years_for(city_df):
     """Expanding full-year validation schedule, identical to main.py."""
     year_counts = city_df.groupby("year").size()
-    full_years = [year for year, rows in year_counts.items() if rows == 52]
+    full_years  = [y for y, n in year_counts.items() if n == 52]
     if not full_years:
         return []
-    first_year = int(city_df["year"].min())
-    first_full_after_start = min(year for year in full_years if year > first_year)
-    return [year for year in full_years if year > first_full_after_start]
+    first_year           = int(city_df["year"].min())
+    first_full_after_start = min(y for y in full_years if y > first_year)
+    return [y for y in full_years if y > first_full_after_start]
 
 
 def resolve_columns(df, requested, city):
-    """Keep only requested exog columns that exist; warn about any that don't."""
-    present = [column for column in requested if column in df.columns]
-    missing = [column for column in requested if column not in df.columns]
+    """Keep only requested columns that exist; warn about any that don't."""
+    present = [c for c in requested if c in df.columns]
+    missing = [c for c in requested if c not in df.columns]
     if missing:
         print(f"  [{city}] warning: skipping {len(missing)} missing exog column(s): "
               f"{', '.join(missing)}")
@@ -274,9 +257,9 @@ def resolve_columns(df, requested, city):
 
 
 ### Expanding full-year validation
-validation_score_records = []
+validation_score_records      = []
 validation_prediction_records = []
-all_actuals, all_predictions = [], []
+all_actuals, all_predictions  = [], []
 
 for city, city_train in train_data.groupby("city", sort=False):
     city_train = city_train.sort_values("week_start_date").reset_index(drop=True)
@@ -286,19 +269,19 @@ for city, city_train in train_data.groupby("city", sort=False):
 
     for validation_year in years:
         fold_train = city_train[city_train["year"] < validation_year]
-        fold_val = city_train[city_train["year"] == validation_year]
+        fold_val   = city_train[city_train["year"] == validation_year]
 
-        exog_train = build_exog(fold_train, climate_columns, args.fourier_harmonics)
-        exog_val = build_exog(fold_val, climate_columns, args.fourier_harmonics)
-        exog_train_s, exog_val_s = standardise(exog_train, exog_val)
+        exog_train_raw = build_exog(fold_train, climate_columns)
+        exog_val_raw   = build_exog(fold_val,   climate_columns)
+        exog_train_s, exog_val_s = standardise(exog_train_raw, exog_val_raw)
 
-        y_log = np.log1p(fold_train["total_cases"].astype(float))
+        y_log    = np.log1p(fold_train["total_cases"].astype(float))
         forecast = fit_forecast(y_log, exog_train_s, exog_val_s, len(fold_val))
         if forecast is None:
             forecast = seasonal_naive(fold_train, fold_val["weekofyear"])
             used = "seasonal_naive_fallback"
         else:
-            used = f"sarimax{sarimax_order}"
+            used = f"sarimax{sarimax_order}_s{sarimax_seasonal_order}"
 
         predictions = finalize(forecast)
         for row, prediction, raw in zip(
@@ -331,7 +314,7 @@ if all_actuals:
         "validation_rows": len(all_actuals), "model": "", "mae": overall,
     })
 
-validation_scores = pd.DataFrame(validation_score_records)
+validation_scores      = pd.DataFrame(validation_score_records)
 validation_predictions = pd.DataFrame(validation_prediction_records)
 
 
@@ -340,18 +323,18 @@ submission_predictions = {}
 
 for city, city_train in train_data.groupby("city", sort=False):
     city_train = city_train.sort_values("week_start_date").reset_index(drop=True)
-    city_test = (
+    city_test  = (
         test_data[test_data["city"] == city]
         .sort_values("week_start_date")
         .reset_index(drop=True)
     )
     climate_columns = resolve_columns(city_train, city_climate_exog[city], city)
 
-    exog_train = build_exog(city_train, climate_columns, args.fourier_harmonics)
-    exog_test = build_exog(city_test, climate_columns, args.fourier_harmonics)
-    exog_train_s, exog_test_s = standardise(exog_train, exog_test)
+    exog_train_raw = build_exog(city_train, climate_columns)
+    exog_test_raw  = build_exog(city_test,  climate_columns)
+    exog_train_s, exog_test_s = standardise(exog_train_raw, exog_test_raw)
 
-    y_log = np.log1p(city_train["total_cases"].astype(float))
+    y_log    = np.log1p(city_train["total_cases"].astype(float))
     forecast = fit_forecast(y_log, exog_train_s, exog_test_s, len(city_test))
     if forecast is None:
         print(f"[{city}] final model: SARIMAX failed, using seasonal-naive fallback.")
@@ -387,15 +370,16 @@ submission.to_csv(submission_path, index=False)
 
 
 ### Summary
-print("\nSARIMAX pipeline complete.")
-print(f"Order (p,d,q): {sarimax_order} | Fourier harmonics: {args.fourier_harmonics}")
+print("\nSARIMAX seasonal pipeline complete.")
+print(f"Non-seasonal order (p,d,q):  {sarimax_order}")
+print(f"Seasonal order (P,D,Q,S):    {sarimax_seasonal_order}")
 print(f"Validation folds: {len(validation_scores[validation_scores['city'] != 'all'])}")
 overall_row = validation_scores.loc[validation_scores["city"] == "all", "mae"]
 if not overall_row.empty:
     print(f"Overall validation MAE: {overall_row.iloc[0]:.4f}")
-print(f"Saved validation scores: {validation_scores_path}")
+print(f"Saved validation scores:      {validation_scores_path}")
 print(f"Saved validation predictions: {validation_predictions_path}")
-print(f"Saved submission: {submission_path}")
+print(f"Saved submission:             {submission_path}")
 
 
 ### Visualisation
@@ -412,37 +396,37 @@ except ImportError:
     print("\n[visualisation] matplotlib not found – skipping plots. "
           "Install with: pip install matplotlib")
 else:
-    CITY_LABELS = {"sj": "San José", "iq": "Iquitos"}
-    COLOR_ACTUAL    = "#1a1a2e"   # near-black for actuals / training history
-    COLOR_PREDICTED = "#e84545"   # warm red for validation predictions
-    COLOR_FORECAST  = "#2d6a4f"   # deep teal-green for test-period forecast
+    CITY_LABELS     = {"sj": "San José", "iq": "Iquitos"}
+    COLOR_ACTUAL    = "#1a1a2e"
+    COLOR_PREDICTED = "#e84545"
+    COLOR_FORECAST  = "#2d6a4f"
     BAND_ALPHA      = 0.06
 
     def _fold_bands(ax, fold_years, date_series):
-        """Shade alternating year-wide bands to delimit validation folds."""
         for idx, year in enumerate(fold_years):
             mask = date_series.dt.year == year
             if not mask.any():
                 continue
-            x0 = date_series[mask].iloc[0]
-            x1 = date_series[mask].iloc[-1]
             ax.axvspan(
-                x0, x1,
+                date_series[mask].iloc[0], date_series[mask].iloc[-1],
                 color="#888888" if idx % 2 == 0 else "#444444",
                 alpha=BAND_ALPHA, linewidth=0,
             )
 
-    def _style(ax, title, ylabel="Total cases"):
+    def _style(ax, title):
         ax.set_title(title, fontsize=11, pad=6)
-        ax.set_ylabel(ylabel, fontsize=9)
+        ax.set_ylabel("Total cases", fontsize=9)
         ax.set_xlabel("Week start date", fontsize=9)
         ax.tick_params(labelsize=8)
         ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=6))
         ax.legend(fontsize=8, loc="upper left", framealpha=0.7)
         ax.spines[["top", "right"]].set_visible(False)
 
-    cities = sorted(validation_predictions["city"].unique()) if not validation_predictions.empty \
+    cities = (
+        sorted(validation_predictions["city"].unique())
+        if not validation_predictions.empty
         else sorted(train_data["city"].unique())
+    )
 
     # ── Figure 1: Validation actuals vs predictions ────────────────────────
     if not validation_predictions.empty:
@@ -450,7 +434,7 @@ else:
             len(cities), 1, figsize=(16, 5 * len(cities)), squeeze=False
         )
         fig1.suptitle(
-            "SARIMAX – Validation: Actual vs Predicted dengue cases",
+            "SARIMAX (seasonal) – Validation: Actual vs Predicted dengue cases",
             fontsize=14, fontweight="bold", y=1.01,
         )
         for ax, city in zip(axes1[:, 0], cities):
@@ -472,7 +456,6 @@ else:
                     color=COLOR_PREDICTED, linewidth=1.5, linestyle="--",
                     alpha=0.88, label="Predicted", zorder=4)
 
-            # Per-fold MAE annotation centred in each band
             y_ann = vp["actual_total_cases"].max() * 0.93
             for year in fold_years:
                 fold_df = vp[vp["validation_year"] == year]
@@ -494,8 +477,10 @@ else:
                 (validation_scores["city"] == city)
                 & (validation_scores["validation_year"] != "all")
             ]
-            avg_mae = city_scores["mae"].astype(float).mean() \
+            avg_mae = (
+                city_scores["mae"].astype(float).mean()
                 if not city_scores.empty else float("nan")
+            )
             _style(ax, f"{CITY_LABELS.get(city, city.upper())}  –  "
                        f"mean validation MAE: {avg_mae:.2f}")
 
@@ -510,7 +495,7 @@ else:
         len(cities), 1, figsize=(16, 5 * len(cities)), squeeze=False
     )
     fig2.suptitle(
-        "SARIMAX – Training history & test-period forecast",
+        "SARIMAX (seasonal) – Training history & test-period forecast",
         fontsize=14, fontweight="bold", y=1.01,
     )
     for ax, city in zip(axes2[:, 0], cities):
@@ -535,7 +520,6 @@ else:
                 color=COLOR_ACTUAL, linewidth=1.2, label="Training actuals", zorder=3)
 
         if not fc.empty:
-            # Seamless bridge from last training point to first forecast point
             bridge_x = [tr["week_start_date"].iloc[-1], fc["week_start_date"].iloc[0]]
             bridge_y = [tr["total_cases"].iloc[-1],      fc["total_cases"].iloc[0]]
             ax.plot(bridge_x, bridge_y,
