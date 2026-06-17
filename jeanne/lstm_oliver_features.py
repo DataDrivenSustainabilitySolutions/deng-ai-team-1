@@ -2,6 +2,7 @@
 
 Example:
     python3 jeanne/lstm_oliver_features.py --city all --epochs 80
+    python3 jeanne/lstm_oliver_features.py --city iq --optuna-trials 25 --epochs 40
 """
 
 import argparse
@@ -21,6 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import numpy as np
+import optuna
 import pandas as pd
 from sklearn.metrics import mean_absolute_error
 import torch
@@ -77,6 +79,15 @@ COLOR_ACTUAL = "#1a1a2e"
 COLOR_PREDICTED = "#e84545"
 COLOR_FORECAST = "#2d6a4f"
 BAND_ALPHA = 0.06
+LSTM_PARAM_KEYS = (
+    "sequence_length",
+    "hidden_size",
+    "num_layers",
+    "dropout",
+    "learning_rate",
+    "weight_decay",
+    "batch_size",
+)
 
 
 @dataclass
@@ -389,6 +400,7 @@ def train_lstm_model(
     city: str,
     phase: str,
 ) -> TrainingResult:
+    set_random_seed(random_state)
     model = LSTMRegressor(
         input_size=input_size,
         hidden_size=hidden_size,
@@ -633,6 +645,283 @@ def plot_submission_prediction(
     plt.close(fig)
 
     return output_path
+
+
+def yearly_time_series_splits(X: pd.DataFrame):
+    years = X.index.get_level_values("year").unique().sort_values()
+
+    for val_year in years[1:]:
+        year = X.index.get_level_values("year")
+        train_index = year < val_year
+        val_index = year == val_year
+
+        if train_index.any() and val_index.any():
+            yield train_index, val_index
+
+
+def lstm_params_from_args(args: argparse.Namespace) -> dict[str, int | float]:
+    return {key: getattr(args, key) for key in LSTM_PARAM_KEYS}
+
+
+def args_with_lstm_params(
+    args: argparse.Namespace,
+    params: dict[str, object],
+) -> argparse.Namespace:
+    updated = argparse.Namespace(**vars(args))
+    for key in LSTM_PARAM_KEYS:
+        if key in params:
+            setattr(updated, key, params[key])
+
+    updated.sequence_length = int(updated.sequence_length)
+    updated.hidden_size = int(updated.hidden_size)
+    updated.num_layers = int(updated.num_layers)
+    updated.batch_size = int(updated.batch_size)
+    updated.dropout = float(updated.dropout)
+    updated.learning_rate = float(updated.learning_rate)
+    updated.weight_decay = float(updated.weight_decay)
+    return updated
+
+
+def suggest_lstm_params(trial: optuna.Trial) -> dict[str, int | float]:
+    return {
+        "sequence_length": trial.suggest_categorical("sequence_length", [4, 8, 12, 16, 24]),
+        "hidden_size": trial.suggest_categorical("hidden_size", [16, 32, 64, 96, 128]),
+        "num_layers": trial.suggest_int("num_layers", 1, 2),
+        "dropout": trial.suggest_float("dropout", 0.0, 0.45),
+        "learning_rate": trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
+        "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
+    }
+
+
+def train_predict_lstm_year_holdout(
+    city_id: str,
+    X: pd.DataFrame,
+    y: pd.Series,
+    validation_year: int,
+    args: argparse.Namespace,
+    device: torch.device,
+    phase: str,
+    seed_offset: int = 0,
+) -> tuple[pd.Series, pd.Series, int, pd.DataFrame, float]:
+    years = X.index.get_level_values("year")
+    fold_row_mask = years <= validation_year
+    X_fold = X.iloc[fold_row_mask]
+    y_fold = y.iloc[fold_row_mask]
+    fold_years = X_fold.index.get_level_values("year")
+    row_train_mask = fold_years < validation_year
+
+    if not row_train_mask.any():
+        raise ValueError(f"{city_id}: Need training rows before {validation_year}.")
+
+    preprocessor = fit_feature_preprocessor(X_fold.iloc[row_train_mask])
+    scaled_features = preprocessor.transform(X_fold)
+    sequences, sequence_targets, sequence_index = build_sequences(
+        scaled_features,
+        X_fold.index,
+        args.sequence_length,
+        y_fold.to_numpy(),
+    )
+    sequence_years = sequence_index.get_level_values("year")
+    sequence_train_mask = sequence_years < validation_year
+    sequence_val_mask = sequence_years == validation_year
+
+    if not sequence_train_mask.any() or not sequence_val_mask.any():
+        raise ValueError(f"{city_id}: Sequence split for {validation_year} is empty.")
+
+    result = train_lstm_model(
+        sequences[sequence_train_mask],
+        sequence_targets[sequence_train_mask],
+        sequences[sequence_val_mask],
+        sequence_targets[sequence_val_mask],
+        input_size=sequences.shape[-1],
+        hidden_size=args.hidden_size,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        epochs=args.epochs,
+        patience=args.patience,
+        batch_size=args.batch_size,
+        target_transform=args.target_transform,
+        random_state=args.random_state + seed_offset,
+        device=device,
+        city=city_id,
+        phase=phase,
+    )
+
+    val_index = sequence_index[sequence_val_mask]
+    raw_predictions = predict_raw(result.model, sequences[sequence_val_mask], device, args.batch_size)
+    predictions = make_case_count_predictions(raw_predictions, val_index, args.target_transform)
+    actual = pd.Series(
+        sequence_targets[sequence_val_mask],
+        index=val_index,
+        name="actual_total_cases",
+    )
+    mae = float(mean_absolute_error(actual, predictions))
+
+    return predictions, actual, result.best_epoch, pd.DataFrame(result.history), mae
+
+
+def plot_best_trial_fold_holdouts(
+    city_id: str,
+    best_params: dict[str, object],
+    args: argparse.Namespace,
+    device: torch.device,
+    output_dir: Path,
+) -> tuple[Path, float]:
+    tuned_args = args_with_lstm_params(args, best_params)
+    X, y = load_data(city_id)
+    years = X.index.get_level_values("year")
+    final_holdout_year = get_last_full_year(X.index)
+    cv_mask = years < final_holdout_year
+    X_cv = X.iloc[cv_mask]
+    y_cv = y.iloc[cv_mask]
+    dates = load_week_start_dates(city_id).reindex(X_cv.index)
+
+    prediction_frames = []
+    fold_maes = []
+    cv_years = X_cv.index.get_level_values("year")
+    for fold, (_, val_index) in enumerate(yearly_time_series_splits(X_cv), start=1):
+        validation_year = int(cv_years[val_index][0])
+        predictions, actual, _, _, mae = train_predict_lstm_year_holdout(
+            city_id,
+            X_cv,
+            y_cv,
+            validation_year,
+            tuned_args,
+            device,
+            phase="optuna_best_fold_plot",
+            seed_offset=10_000 + fold,
+        )
+        fold_maes.append(mae)
+        prediction_frames.append(
+            pd.DataFrame(
+                {
+                    "date": dates.reindex(predictions.index),
+                    "total_cases": actual,
+                    "prediction": predictions,
+                    "fold": fold,
+                    "holdout_year": validation_year,
+                }
+            )
+        )
+
+    if not prediction_frames:
+        raise ValueError(f"{city_id}: Need at least three years for yearly fold holdout plotting.")
+
+    actual_data = pd.DataFrame({"date": dates, "total_cases": y_cv}).sort_values("date")
+    prediction_data = pd.concat(prediction_frames).sort_values("date")
+    cv_mae = float(sum(fold_maes) / len(fold_maes))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{city_id}_lstm_best_trial_fold_holdouts.png"
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(
+        actual_data["date"],
+        actual_data["total_cases"],
+        label="Observed cases",
+        color=COLOR_ACTUAL,
+        linewidth=1.4,
+        zorder=3,
+    )
+
+    folds = prediction_data["fold"].unique()
+    colors = plt.cm.tab20(np.linspace(0, 1, len(folds)))
+    for color, (fold, fold_data) in zip(colors, prediction_data.groupby("fold", sort=True)):
+        holdout_year = int(fold_data["holdout_year"].iloc[0])
+        ax.plot(
+            fold_data["date"],
+            fold_data["prediction"],
+            label=f"Fold {fold}: {holdout_year}",
+            color=color,
+            linewidth=1.7,
+            linestyle="--",
+            zorder=4,
+        )
+        ax.axvline(fold_data["date"].iloc[0], color="#d1d5db", linewidth=0.8, alpha=0.85)
+
+    style_time_axis(
+        ax,
+        f"{CITY_LABELS.get(city_id, city_id.upper())} - best Optuna LSTM yearly CV MAE: {cv_mae:.2f}",
+    )
+    ax.legend(ncol=2, fontsize=7, loc="upper left", framealpha=0.72)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    return output_path, cv_mae
+
+
+def run_lstm_optuna_for_city(
+    city_id: str,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[argparse.Namespace, optuna.Study, Path, float, Path]:
+    X, y = load_data(city_id)
+    years = X.index.get_level_values("year")
+    final_holdout_year = get_last_full_year(X.index)
+    cv_mask = years < final_holdout_year
+    X_cv = X.iloc[cv_mask]
+    y_cv = y.iloc[cv_mask]
+    cv_years = X_cv.index.get_level_values("year")
+
+    if len(cv_years.unique()) < 2:
+        raise ValueError(f"{city_id}: Need at least two CV years before the final holdout.")
+
+    def objective(trial: optuna.Trial) -> float:
+        trial_args = args_with_lstm_params(args, suggest_lstm_params(trial))
+        fold_maes = []
+
+        for fold, (_, val_index) in enumerate(yearly_time_series_splits(X_cv), start=1):
+            validation_year = int(cv_years[val_index][0])
+            try:
+                _, _, _, _, mae = train_predict_lstm_year_holdout(
+                    city_id,
+                    X_cv,
+                    y_cv,
+                    validation_year,
+                    trial_args,
+                    device,
+                    phase="optuna_cv",
+                    seed_offset=trial.number * 1_000 + fold,
+                )
+            except ValueError as exc:
+                raise optuna.TrialPruned(str(exc)) from exc
+
+            fold_maes.append(mae)
+            trial.set_user_attr(f"fold_{fold}_year", validation_year)
+            trial.set_user_attr(f"fold_{fold}_mae", mae)
+            trial.report(float(sum(fold_maes) / len(fold_maes)), step=fold)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+        return float(sum(fold_maes) / len(fold_maes))
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    storage_path = args.output_dir / "lstm_optuna.db"
+    study = optuna.create_study(
+        study_name=f"lstm_oliver_{city_id}_{args.target_transform}",
+        storage=f"sqlite:///{storage_path}",
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=args.random_state),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=1),
+        load_if_exists=True,
+    )
+    study.optimize(objective, n_trials=args.optuna_trials, n_jobs=1)
+
+    trials_path = args.output_dir / f"{city_id}_lstm_optuna_trials.csv"
+    study.trials_dataframe().to_csv(trials_path, index=False)
+    fold_plot_path, fold_cv_mae = plot_best_trial_fold_holdouts(
+        city_id,
+        study.best_params,
+        args,
+        device,
+        args.output_dir / "plots",
+    )
+
+    return args_with_lstm_params(args, study.best_params), study, fold_plot_path, fold_cv_mae, trials_path
 
 
 def run_holdout_for_city(
@@ -1070,19 +1359,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--final-epochs", type=int, default=0, help="Use 0 to reuse each holdout best epoch.")
     parser.add_argument("--prediction-weeks", type=int, default=WEEKS_PER_YEAR, help="Use 0 to predict all test rows.")
     parser.add_argument("--patience", type=int, default=12)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, deoptuna_trialsfault=32)
     parser.add_argument("--hidden-size", type=int, default=64)
     parser.add_argument("--num-layers", type=int, default=1)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--target-transform", choices=["none", "log1p"], default="log1p")
+    parser.add_argument("--optuna-trials", type=int, default=50, help="Use 0 to skip Optuna tuning.")
     parser.add_argument("--random-state", type=int, default=7)
     parser.add_argument("--torch-threads", type=int, default=1)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--prediction-output", default="one_year_prediction_lstm.csv")
-    parser.add_argument("--write-full-submission", action="store_true")
+    parser.add_argument("--write-full-submission", default=True, action="store_true")
     parser.add_argument("--submission-output", default="submission_prediction_lstm.csv")
 
     args = parser.parse_args()
@@ -1106,6 +1396,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--learning-rate must be positive.")
     if args.weight_decay < 0.0:
         raise ValueError("--weight-decay must be non-negative.")
+    if args.optuna_trials < 0:
+        raise ValueError("--optuna-trials must be non-negative.")
     if args.torch_threads < 1:
         raise ValueError("--torch-threads must be at least 1.")
 
@@ -1126,17 +1418,44 @@ def main() -> None:
     test_predictions = []
     holdout_plot_paths = []
     test_plot_paths = []
+    optuna_summaries = []
+    optuna_fold_plot_paths = []
 
     for city_id in cities:
+        city_args = args
+        if args.optuna_trials:
+            city_args, study, fold_plot_path, fold_cv_mae, trials_path = run_lstm_optuna_for_city(
+                city_id,
+                args,
+                device,
+            )
+            optuna_summaries.append(
+                {
+                    "city": city_id,
+                    "best_value": float(study.best_value),
+                    "best_params": study.best_params,
+                    "fold_cv_mae": fold_cv_mae,
+                    "trials_path": trials_path,
+                }
+            )
+            optuna_fold_plot_paths.append(fold_plot_path)
+
         score_record, validation_predictions, holdout_history, best_epoch, holdout_plot_path = run_holdout_for_city(
             city_id,
-            args,
+            city_args,
             device,
         )
-        final_epochs = args.final_epochs or max(1, best_epoch)
+        if optuna_summaries and optuna_summaries[-1]["city"] == city_id:
+            score_record["optuna_best_value"] = optuna_summaries[-1]["best_value"]
+            score_record["optuna_fold_cv_mae"] = optuna_summaries[-1]["fold_cv_mae"]
+            score_record["optuna_trials_path"] = str(optuna_summaries[-1]["trials_path"])
+            for key, value in lstm_params_from_args(city_args).items():
+                score_record[f"optuna_{key}"] = value
+
+        final_epochs = city_args.final_epochs or max(1, best_epoch)
         city_test_predictions, test_history, test_plot_path = run_submission_for_city(
             city_id,
-            args,
+            city_args,
             device,
             final_epochs,
         )
@@ -1184,12 +1503,22 @@ def main() -> None:
     print("Target transform:", args.target_transform)
     print("Sequence length:", args.sequence_length)
     print("Prediction weeks:", "all" if args.prediction_weeks == 0 else args.prediction_weeks)
+    print("Optuna trials:", args.optuna_trials)
+    if optuna_summaries:
+        for summary in optuna_summaries:
+            print(
+                f"Optuna best {summary['city']}: "
+                f"{summary['best_value']:.3f} with {summary['best_params']}"
+            )
+            print(f"Optuna trials {summary['city']}:", summary["trials_path"])
     print("Validation scores:", validation_scores_path)
     print("Validation predictions:", validation_predictions_path)
     print("Training history:", training_history_path)
     print("Prediction CSV:", prediction_path)
     if submission_path is not None:
         print("Full submission CSV:", submission_path)
+    if optuna_fold_plot_paths:
+        print("Best-trial fold plots:", ", ".join(str(path) for path in optuna_fold_plot_paths))
     print("Holdout plots:", ", ".join(str(path) for path in holdout_plot_paths))
     print("Prediction plots:", ", ".join(str(path) for path in test_plot_paths))
     print("Combined plots:", ", ".join(str(path) for path in combined_plot_paths))

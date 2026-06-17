@@ -1,3 +1,3 @@
-city,validation_year,train_sequences,validation_sequences,feature_count,sequence_length,best_epoch,mae,final_epochs
-sj,2007,856,52,12,12,2,24.365385055541992,2
-iq,2009,431,52,15,12,1,4.82692289352417,1
+city,validation_year,train_sequences,validation_sequences,feature_count,sequence_length,best_epoch,mae,optuna_best_value,optuna_fold_cv_mae,optuna_trials_path,optuna_sequence_length,optuna_hidden_size,optuna_num_layers,optuna_dropout,optuna_learning_rate,optuna_weight_decay,optuna_batch_size,final_epochs
+sj,2007,844,52,12,24,1,20.576923370361328,16.5721156001091,16.382211685180664,/home/ninjeanne/Documents/h-ka/dissertation/deng-ai-team-1/jeanne/lstm_outputs/sj_lstm_optuna_trials.csv,24,128,1,0.0828969769967553,0.004634813178823418,0.0012823273424906088,64,1
+iq,2009,419,52,15,24,2,5.115384578704834,5.44230767339468,5.531250096857548,/home/ninjeanne/Documents/h-ka/dissertation/deng-ai-team-1/jeanne/lstm_outputs/iq_lstm_optuna_trials.csv,24,64,2,0.3010559583977612,0.000623301365246935,6.59775768449377e-06,16,2

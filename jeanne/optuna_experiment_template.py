@@ -25,11 +25,11 @@ CODECARBON_DIR = BASE_DIR / "codecarbon_logs"
 PLOT_DIR = BASE_DIR / "optuna_plots"
 SUBMISSION_OUTPUT_PATH = BASE_DIR / "submission_prediction.csv"
 STORAGE = f"sqlite:///{DB_PATH}"
-CITY_ID = "sj"
+CITY_ID = "iq"
 TARGET_TRANSFORM = "none" #"log1p"
 STUDY_NAME = "random_forest_forecasting_plotted_{}_{}".format(CITY_ID, TARGET_TRANSFORM)
 RANDOM_STATE = 7
-N_TRIALS = 50
+N_TRIALS = 0
 MERGE_KEYS = ["city", "year", "weekofyear"]
 IDENTIFIER_COLUMNS = {
     "city",
@@ -416,7 +416,7 @@ def objective(trial: optuna.Trial) -> float:
             trial.set_user_attr(f"fold_{fold}_mse", mse)
             trial.set_user_attr(f"fold_{fold}_mae", mae)
 
-        return float(sum(fold_maes) / len(fold_maes))
+        return float(sum(fold_mses) / len(fold_mses))
     finally:
         emissions_kg = tracker.stop()
         trial.set_user_attr("emissions_kg_co2eq", emissions_kg)
@@ -436,6 +436,7 @@ def plot_best_trial_fold_holdouts(
     X_cv = X.iloc[cv_index]
     y_cv = y.iloc[cv_index]
     dates = load_week_start_dates(city_id).reindex(X_cv.index)
+    print(best_params)
 
     prediction_frames = []
     fold_maes = []
@@ -467,7 +468,7 @@ def plot_best_trial_fold_holdouts(
     cv_mae = float(sum(fold_maes) / len(fold_maes))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{city_id}_best_trial_fold_holdouts.png"
+    output_path = output_dir / f"{city_id}_best_trial_fold_holdouts_mse.png"
 
     fig, ax = plt.subplots(figsize=(14, 6))
     ax.plot(actual_data["date"], actual_data["total_cases"], label="Observed cases", color="#1f2937")
