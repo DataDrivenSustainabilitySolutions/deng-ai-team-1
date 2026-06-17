@@ -113,6 +113,12 @@ parser.add_argument(
     help="LightGBM loss candidates to evaluate per city. Default: tweedie poisson l1",
 )
 parser.add_argument(
+    "--target-transform",
+    choices=["none", "log1p"],
+    default="none",
+    help="Optional transform applied to total_cases during fitting. Default: none",
+)
+parser.add_argument(
     "--tweedie-variance-power",
     type=float,
     default=1.3,
@@ -553,6 +559,18 @@ def make_model_params(loss_name, hyperparameters, tweedie_variance_power=None):
     return model_params
 
 
+def transform_target(target):
+    if args.target_transform == "log1p":
+        return np.log1p(target)
+    return target
+
+
+def inverse_transform_prediction(prediction):
+    if args.target_transform == "log1p":
+        return np.expm1(prediction)
+    return prediction
+
+
 def get_validation_years(city_train_data):
     year_counts = city_train_data.groupby("year").size()
     full_years = [year for year, rows in year_counts.items() if rows == 52]
@@ -574,12 +592,12 @@ def score_city_params(city_train_data, feature_columns, validation_years, model_
         model = LGBMRegressor(**model_params)
         model.fit(
             fold_train_data[feature_columns],
-            fold_train_data["total_cases"],
+            transform_target(fold_train_data["total_cases"]),
         )
 
         raw_predictions = model.predict(fold_validation_data[feature_columns])
         fold_predictions = [
-            int(round(max(0.0, float(raw_prediction))))
+            int(round(max(0.0, float(inverse_transform_prediction(raw_prediction)))))
             for raw_prediction in raw_predictions
         ]
         fold_maes.append(mean_absolute_error(fold_validation_data["total_cases"], fold_predictions))
@@ -769,14 +787,14 @@ for city, city_train_data in train_model_data.groupby("city", sort=False):
         model = LGBMRegressor(**city_model_params[city])
         model.fit(
             fold_train_data[feature_columns],
-            fold_train_data["total_cases"],
+            transform_target(fold_train_data["total_cases"]),
         )
 
         fold_predictions = []
         raw_predictions = model.predict(fold_validation_data[feature_columns])
 
         for row, raw_prediction in zip(fold_validation_data.itertuples(index=False), raw_predictions):
-            raw_prediction = float(raw_prediction)
+            raw_prediction = float(inverse_transform_prediction(raw_prediction))
             clipped_prediction = max(0.0, raw_prediction)
             integer_prediction = int(round(clipped_prediction))
 
@@ -840,7 +858,7 @@ for city, city_train_data in train_model_data.groupby("city", sort=False):
     model = LGBMRegressor(**city_model_params[city])
     model.fit(
         city_train_data[feature_columns],
-        city_train_data["total_cases"],
+        transform_target(city_train_data["total_cases"]),
     )
 
     gain_importance = model.booster_.feature_importance(importance_type="gain")
@@ -859,7 +877,7 @@ for city, city_train_data in train_model_data.groupby("city", sort=False):
     raw_predictions = model.predict(city_test_data[feature_columns])
 
     for row, raw_prediction in zip(city_test_data.itertuples(index=False), raw_predictions):
-        raw_prediction = float(raw_prediction)
+        raw_prediction = float(inverse_transform_prediction(raw_prediction))
         clipped_prediction = max(0.0, raw_prediction)
         integer_prediction = int(round(clipped_prediction))
 
@@ -921,6 +939,7 @@ experiment_log_record = {
         "submission_format_csv": str(submission_format_path),
         "random_state": args.random_state,
         "losses": candidate_losses,
+        "target_transform": args.target_transform,
         "tweedie_variance_power": args.tweedie_variance_power,
         "tune_hyperparameters": args.tune_hyperparameters,
         "optuna_trials": args.optuna_trials if args.tune_hyperparameters else 0,
