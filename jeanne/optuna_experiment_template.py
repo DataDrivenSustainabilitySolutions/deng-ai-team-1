@@ -14,7 +14,7 @@ import numpy as np
 import optuna
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 from codecarbon import EmissionsTracker
 
@@ -27,7 +27,7 @@ SUBMISSION_OUTPUT_PATH = BASE_DIR / "submission_prediction.csv"
 STORAGE = f"sqlite:///{DB_PATH}"
 CITY_ID = "sj"
 TARGET_TRANSFORM = "none" #"log1p"
-STUDY_NAME = "random_forest_forecasting_{}_{}".format(CITY_ID, TARGET_TRANSFORM)
+STUDY_NAME = "random_forest_forecasting_plotted_{}_{}".format(CITY_ID, TARGET_TRANSFORM)
 RANDOM_STATE = 7
 N_TRIALS = 50
 MERGE_KEYS = ["city", "year", "weekofyear"]
@@ -398,8 +398,9 @@ def objective(trial: optuna.Trial) -> float:
     tracker.start()
 
     try:
+        fold_mses = []
         fold_maes = []
-        # wie funktioniert der fold fuer den trial? wie wird gemittelt
+
         for fold, (train_index, test_index) in enumerate(yearly_time_series_splits(X_cv), start=1):
             model = build_model(trial)
             model.fit(X_cv.iloc[train_index], transform_target(y_cv.iloc[train_index]))
@@ -408,8 +409,11 @@ def objective(trial: optuna.Trial) -> float:
                 model.predict(X_cv.iloc[test_index]),
                 index=X_cv.iloc[test_index].index,
             )
+            mse = float(mean_squared_error(y_cv.iloc[test_index], pred))
             mae = float(mean_absolute_error(y_cv.iloc[test_index], pred))
+            fold_mses.append(mse)
             fold_maes.append(mae)
+            trial.set_user_attr(f"fold_{fold}_mse", mse)
             trial.set_user_attr(f"fold_{fold}_mae", mae)
 
         return float(sum(fold_maes) / len(fold_maes))
@@ -420,6 +424,76 @@ def objective(trial: optuna.Trial) -> float:
             "codecarbon_csv",
             str(CODECARBON_DIR / f"{STUDY_NAME}_trial_{trial.number}_emissions.csv"),
         )
+
+
+def plot_best_trial_fold_holdouts(
+    city_id: str,
+    best_params: dict[str, object],
+    output_dir: Path = PLOT_DIR,
+) -> tuple[Path, float]:
+    X, y = load_data(city_id)
+    cv_index, _ = final_year_holdout_split(X)
+    X_cv = X.iloc[cv_index]
+    y_cv = y.iloc[cv_index]
+    dates = load_week_start_dates(city_id).reindex(X_cv.index)
+
+    prediction_frames = []
+    fold_maes = []
+    for fold, (train_index, test_index) in enumerate(yearly_time_series_splits(X_cv), start=1):
+        model = build_model_from_params(best_params)
+        model.fit(X_cv.iloc[train_index], transform_target(y_cv.iloc[train_index]))
+
+        X_test = X_cv.iloc[test_index]
+        y_test = y_cv.iloc[test_index]
+        prediction = make_case_count_predictions(model.predict(X_test), index=X_test.index)
+        fold_maes.append(float(mean_absolute_error(y_test, prediction)))
+        prediction_frames.append(
+            pd.DataFrame(
+                {
+                    "date": dates.iloc[test_index],
+                    "total_cases": y_test,
+                    "prediction": prediction,
+                    "fold": fold,
+                    "holdout_year": X_test.index.get_level_values("year"),
+                }
+            )
+        )
+
+    if not prediction_frames:
+        raise ValueError("Need at least three years to plot yearly fold holdout predictions.")
+
+    actual_data = pd.DataFrame({"date": dates, "total_cases": y_cv}).sort_values("date")
+    prediction_data = pd.concat(prediction_frames).sort_values("date")
+    cv_mae = float(sum(fold_maes) / len(fold_maes))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{city_id}_best_trial_fold_holdouts.png"
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(actual_data["date"], actual_data["total_cases"], label="Observed cases", color="#1f2937")
+
+    folds = prediction_data["fold"].unique()
+    colors = plt.cm.tab20(np.linspace(0, 1, len(folds)))
+    for color, (fold, fold_data) in zip(colors, prediction_data.groupby("fold", sort=True)):
+        holdout_year = int(fold_data["holdout_year"].iloc[0])
+        ax.plot(
+            fold_data["date"],
+            fold_data["prediction"],
+            label=f"Fold {fold}: {holdout_year}",
+            color=color,
+            linewidth=1.8,
+        )
+        ax.axvline(fold_data["date"].iloc[0], color="#d1d5db", linewidth=0.8, alpha=0.8)
+
+    ax.set_title(f"{city_id}: yearly CV holdout predictions (MAE: {cv_mae:.3f})")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Total cases")
+    ax.legend(ncol=2, fontsize="small")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+    return output_path, cv_mae
 
 
 def plot_best_model_prediction(
@@ -575,6 +649,7 @@ def main() -> None:
         load_if_exists=True,
     )
     study.optimize(objective, n_trials=N_TRIALS, n_jobs=1)
+    fold_plot_path, fold_cv_mae = plot_best_trial_fold_holdouts(CITY_ID, study.best_params)
     plot_path, final_mae = plot_best_model_prediction(CITY_ID, study.best_params)
     submission_predictions, _ = predict_submission_from_test(CITY_ID, study.best_params)
     submission_path = save_submission_predictions(submission_predictions)
@@ -593,6 +668,8 @@ def main() -> None:
     print("CodeCarbon logs:", CODECARBON_DIR)
     print("Best MAE:", round(study.best_value, 3))
     print("Best params:", study.best_params)
+    print("Best trial yearly CV holdout MAE:", round(fold_cv_mae, 3))
+    print("Best trial yearly CV holdout plot:", fold_plot_path)
     print("Final holdout MAE:", round(final_mae, 3))
     print("Final holdout prediction plot:", plot_path)
     print("Submission CSV:", submission_path)

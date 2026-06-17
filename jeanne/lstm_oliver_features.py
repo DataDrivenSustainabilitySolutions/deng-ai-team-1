@@ -19,6 +19,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error
@@ -70,6 +71,12 @@ IQ_WEATHER_ROOTS = [
     "reanalysis_sat_precip_amt_mm",
     "reanalysis_precip_amt_kg_per_m2",
 ]
+
+CITY_LABELS = {"sj": "San Juan", "iq": "Iquitos"}
+COLOR_ACTUAL = "#1a1a2e"
+COLOR_PREDICTED = "#e84545"
+COLOR_FORECAST = "#2d6a4f"
+BAND_ALPHA = 0.06
 
 
 @dataclass
@@ -470,6 +477,32 @@ def train_lstm_model(
     )
 
 
+def fold_bands(ax, fold_years, date_series: pd.Series) -> None:
+    dates = pd.Series(pd.to_datetime(date_series)).reset_index(drop=True)
+    for idx, year in enumerate(fold_years):
+        mask = dates.dt.year == int(year)
+        if not mask.any():
+            continue
+        ax.axvspan(
+            dates[mask].iloc[0],
+            dates[mask].iloc[-1],
+            color="#888888" if idx % 2 == 0 else "#444444",
+            alpha=BAND_ALPHA,
+            linewidth=0,
+        )
+
+
+def style_time_axis(ax, title: str) -> None:
+    ax.set_title(title, fontsize=11, pad=6)
+    ax.set_ylabel("Total cases", fontsize=9)
+    ax.set_xlabel("Week start date", fontsize=9)
+    ax.tick_params(labelsize=8)
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=6))
+    ax.legend(fontsize=8, loc="upper left", framealpha=0.7)
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+
+
 def plot_holdout_prediction(
     city_id: str,
     y: pd.Series,
@@ -479,13 +512,6 @@ def plot_holdout_prediction(
     output_dir: Path,
 ) -> Path:
     dates = load_week_start_dates(city_id).reindex(y.index)
-    train_mask = y.index.get_level_values("year") < holdout_year
-    train_data = pd.DataFrame(
-        {
-            "date": dates[train_mask],
-            "total_cases": y[train_mask],
-        }
-    ).sort_values("date")
     holdout_data = pd.DataFrame(
         {
             "date": dates.reindex(prediction.index),
@@ -498,16 +524,42 @@ def plot_holdout_prediction(
     output_path = output_dir / f"{city_id}_lstm_holdout_prediction.png"
 
     fig, ax = plt.subplots(figsize=(14, 6))
-    ax.plot(train_data["date"], train_data["total_cases"], label="Train labels", color="#1f2937")
-    ax.plot(holdout_data["date"], holdout_data["total_cases"], label="Holdout labels", color="#2563eb")
-    ax.plot(holdout_data["date"], holdout_data["prediction"], label="LSTM prediction", color="#dc2626")
-    ax.axvline(holdout_data["date"].iloc[0], color="#6b7280", linestyle="--", linewidth=1)
-    ax.set_title(f"{city_id}: {holdout_year} LSTM holdout prediction (MAE: {final_mae:.3f})")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Total cases")
-    ax.legend()
+    fold_bands(ax, [holdout_year], holdout_data["date"])
+    ax.plot(
+        holdout_data["date"],
+        holdout_data["total_cases"],
+        color=COLOR_ACTUAL,
+        linewidth=1.5,
+        label="Actual",
+        zorder=3,
+    )
+    ax.plot(
+        holdout_data["date"],
+        holdout_data["prediction"],
+        color=COLOR_PREDICTED,
+        linewidth=1.5,
+        linestyle="--",
+        alpha=0.88,
+        label="Predicted",
+        zorder=4,
+    )
+    y_ann = max(float(holdout_data["total_cases"].max()), float(holdout_data["prediction"].max()), 1.0) * 0.93
+    x_mid = holdout_data["date"].iloc[len(holdout_data) // 2]
+    ax.annotate(
+        f"{holdout_year}\nMAE {final_mae:.1f}",
+        xy=(x_mid, y_ann),
+        ha="center",
+        va="top",
+        fontsize=7.5,
+        color="#555555",
+        annotation_clip=True,
+    )
+    style_time_axis(
+        ax,
+        f"{CITY_LABELS.get(city_id, city_id.upper())} - LSTM holdout MAE: {final_mae:.2f}",
+    )
     fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     return output_path
@@ -543,15 +595,41 @@ def plot_submission_prediction(
     output_path = output_dir / f"{city_id}_lstm_{plot_suffix}_prediction.png"
 
     fig, ax = plt.subplots(figsize=(14, 6))
-    ax.plot(train_plot["date"], train_plot["total_cases"], label="Train labels", color="#1f2937")
-    ax.plot(test_plot["date"], test_plot["prediction"], label=f"LSTM {horizon_label} prediction", color="#dc2626")
-    ax.axvline(first_test_date, color="#6b7280", linestyle="--", linewidth=1)
-    ax.set_title(f"{city_id}: LSTM {horizon_label} prediction")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Total cases")
-    ax.legend()
+    ax.plot(
+        train_plot["date"],
+        train_plot["total_cases"],
+        color=COLOR_ACTUAL,
+        linewidth=1.2,
+        label="Training actuals",
+        zorder=3,
+    )
+    if not test_plot.empty:
+        bridge_x = [train_plot["date"].iloc[-1], test_plot["date"].iloc[0]]
+        bridge_y = [train_plot["total_cases"].iloc[-1], test_plot["prediction"].iloc[0]]
+        ax.plot(bridge_x, bridge_y, color=COLOR_FORECAST, linewidth=1.5, linestyle="--", zorder=4)
+        ax.plot(
+            test_plot["date"],
+            test_plot["prediction"],
+            color=COLOR_FORECAST,
+            linewidth=1.8,
+            linestyle="--",
+            label=f"LSTM {horizon_label} prediction",
+            zorder=4,
+        )
+        ax.axvspan(
+            test_plot["date"].iloc[0],
+            test_plot["date"].iloc[-1],
+            color=COLOR_FORECAST,
+            alpha=0.07,
+            linewidth=0,
+        )
+        ax.axvline(test_plot["date"].iloc[0], color=COLOR_FORECAST, linewidth=0.8, linestyle=":")
+    style_time_axis(
+        ax,
+        f"{CITY_LABELS.get(city_id, city_id.upper())} - LSTM training history & {horizon_label} forecast",
+    )
     fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     return output_path
@@ -788,6 +866,200 @@ def save_submission_predictions(predictions: list[pd.Series], output_path: Path)
     return output_path
 
 
+def build_forecast_plot_frame(city_id: str, prediction: pd.Series) -> pd.DataFrame:
+    _, test_dates = load_test_data(city_id)
+    prediction_index = prediction.index.droplevel("city")
+    return pd.DataFrame(
+        {
+            "city": city_id,
+            "year": prediction_index.get_level_values("year"),
+            "weekofyear": prediction_index.get_level_values("weekofyear"),
+            "week_start_date": test_dates.reindex(prediction_index).to_numpy(),
+            "total_cases": prediction.to_numpy(),
+        }
+    ).sort_values("week_start_date")
+
+
+def plot_sarimax_style_visualizations(
+    validation_predictions: pd.DataFrame,
+    validation_scores: pd.DataFrame,
+    test_predictions: list[pd.Series],
+    output_dir: Path,
+    prediction_weeks: int,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plot_paths = []
+    forecast_by_city = {
+        prediction.index.get_level_values("city")[0]: prediction
+        for prediction in test_predictions
+        if len(prediction) > 0
+    }
+    cities = sorted(forecast_by_city)
+    if not cities and not validation_predictions.empty:
+        cities = sorted(validation_predictions["city"].unique())
+
+    if not validation_predictions.empty:
+        fig1, axes1 = plt.subplots(
+            len(cities),
+            1,
+            figsize=(16, 5 * len(cities)),
+            squeeze=False,
+        )
+        fig1.suptitle(
+            "LSTM - Validation: Actual vs Predicted dengue cases",
+            fontsize=14,
+            fontweight="bold",
+            y=1.01,
+        )
+        validation_predictions = validation_predictions.copy()
+        validation_predictions["week_start_date"] = pd.to_datetime(validation_predictions["week_start_date"])
+
+        for ax, city in zip(axes1[:, 0], cities):
+            vp = (
+                validation_predictions[validation_predictions["city"] == city]
+                .sort_values("week_start_date")
+                .reset_index(drop=True)
+            )
+            if vp.empty:
+                ax.set_visible(False)
+                continue
+
+            fold_years = sorted(vp["validation_year"].unique())
+            fold_bands(ax, fold_years, vp["week_start_date"])
+            ax.plot(
+                vp["week_start_date"],
+                vp["actual_total_cases"],
+                color=COLOR_ACTUAL,
+                linewidth=1.5,
+                label="Actual",
+                zorder=3,
+            )
+            ax.plot(
+                vp["week_start_date"],
+                vp["predicted_total_cases"],
+                color=COLOR_PREDICTED,
+                linewidth=1.5,
+                linestyle="--",
+                alpha=0.88,
+                label="Predicted",
+                zorder=4,
+            )
+
+            y_ann = max(float(vp["actual_total_cases"].max()), float(vp["predicted_total_cases"].max()), 1.0) * 0.93
+            for year in fold_years:
+                fold_df = vp[vp["validation_year"] == year]
+                if fold_df.empty:
+                    continue
+                mae_val = mean_absolute_error(
+                    fold_df["actual_total_cases"],
+                    fold_df["predicted_total_cases"],
+                )
+                x_mid = fold_df["week_start_date"].iloc[len(fold_df) // 2]
+                ax.annotate(
+                    f"{year}\nMAE {mae_val:.1f}",
+                    xy=(x_mid, y_ann),
+                    ha="center",
+                    va="top",
+                    fontsize=7.5,
+                    color="#555555",
+                    annotation_clip=True,
+                )
+
+            city_scores = validation_scores[validation_scores["city"] == city]
+            avg_mae = city_scores["mae"].astype(float).mean() if not city_scores.empty else float("nan")
+            style_time_axis(
+                ax,
+                f"{CITY_LABELS.get(city, city.upper())} - mean validation MAE: {avg_mae:.2f}",
+            )
+
+        fig1.tight_layout()
+        validation_plot_path = output_dir / "validation_actual_vs_predicted.png"
+        fig1.savefig(validation_plot_path, dpi=150, bbox_inches="tight")
+        plt.close(fig1)
+        plot_paths.append(validation_plot_path)
+
+    if cities:
+        fig2, axes2 = plt.subplots(
+            len(cities),
+            1,
+            figsize=(16, 5 * len(cities)),
+            squeeze=False,
+        )
+        horizon_label = "full test set" if prediction_weeks == 0 else f"next {prediction_weeks} weeks"
+        fig2.suptitle(
+            f"LSTM - Training history & {horizon_label} forecast",
+            fontsize=14,
+            fontweight="bold",
+            y=1.01,
+        )
+
+        for ax, city in zip(axes2[:, 0], cities):
+            _, y_train = load_data(city)
+            train_dates = load_week_start_dates(city, source="train").reindex(y_train.index)
+            train_plot = pd.DataFrame(
+                {
+                    "week_start_date": train_dates,
+                    "total_cases": y_train,
+                }
+            ).sort_values("week_start_date")
+            forecast_plot = build_forecast_plot_frame(city, forecast_by_city[city])
+
+            ax.plot(
+                train_plot["week_start_date"],
+                train_plot["total_cases"],
+                color=COLOR_ACTUAL,
+                linewidth=1.2,
+                label="Training actuals",
+                zorder=3,
+            )
+
+            if not forecast_plot.empty:
+                bridge_x = [
+                    train_plot["week_start_date"].iloc[-1],
+                    forecast_plot["week_start_date"].iloc[0],
+                ]
+                bridge_y = [
+                    train_plot["total_cases"].iloc[-1],
+                    forecast_plot["total_cases"].iloc[0],
+                ]
+                ax.plot(bridge_x, bridge_y, color=COLOR_FORECAST, linewidth=1.5, linestyle="--", zorder=4)
+                ax.plot(
+                    forecast_plot["week_start_date"],
+                    forecast_plot["total_cases"],
+                    color=COLOR_FORECAST,
+                    linewidth=1.8,
+                    linestyle="--",
+                    label="Test forecast",
+                    zorder=4,
+                )
+                ax.axvspan(
+                    forecast_plot["week_start_date"].iloc[0],
+                    forecast_plot["week_start_date"].iloc[-1],
+                    color=COLOR_FORECAST,
+                    alpha=0.07,
+                    linewidth=0,
+                )
+                ax.axvline(
+                    forecast_plot["week_start_date"].iloc[0],
+                    color=COLOR_FORECAST,
+                    linewidth=0.8,
+                    linestyle=":",
+                )
+
+            style_time_axis(
+                ax,
+                f"{CITY_LABELS.get(city, city.upper())} - training history & forecast",
+            )
+
+        fig2.tight_layout()
+        forecast_plot_path = output_dir / "forecast_vs_history.png"
+        fig2.savefig(forecast_plot_path, dpi=150, bbox_inches="tight")
+        plt.close(fig2)
+        plot_paths.append(forecast_plot_path)
+
+    return plot_paths
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train an LSTM on the same Oliver engineered features used by the Optuna template."
@@ -891,9 +1163,20 @@ def main() -> None:
             args.output_dir / args.submission_output,
         )
 
-    pd.DataFrame(validation_scores).to_csv(validation_scores_path, index=False)
-    pd.concat(validation_prediction_frames, ignore_index=True).to_csv(validation_predictions_path, index=False)
-    pd.concat(history_frames, ignore_index=True).to_csv(training_history_path, index=False)
+    validation_scores_df = pd.DataFrame(validation_scores)
+    validation_predictions_df = pd.concat(validation_prediction_frames, ignore_index=True)
+    training_history_df = pd.concat(history_frames, ignore_index=True)
+    combined_plot_paths = plot_sarimax_style_visualizations(
+        validation_predictions_df,
+        validation_scores_df,
+        test_predictions,
+        args.output_dir / "plots",
+        args.prediction_weeks,
+    )
+
+    validation_scores_df.to_csv(validation_scores_path, index=False)
+    validation_predictions_df.to_csv(validation_predictions_path, index=False)
+    training_history_df.to_csv(training_history_path, index=False)
 
     print("LSTM Oliver-feature run")
     print("Cities:", ", ".join(cities))
@@ -909,6 +1192,7 @@ def main() -> None:
         print("Full submission CSV:", submission_path)
     print("Holdout plots:", ", ".join(str(path) for path in holdout_plot_paths))
     print("Prediction plots:", ", ".join(str(path) for path in test_plot_paths))
+    print("Combined plots:", ", ".join(str(path) for path in combined_plot_paths))
 
 
 if __name__ == "__main__":
