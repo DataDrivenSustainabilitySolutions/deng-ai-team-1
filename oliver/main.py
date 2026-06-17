@@ -5,6 +5,8 @@ Example:
 """
 
 import argparse
+from datetime import datetime, timezone
+import json
 import math
 import os
 import random
@@ -91,6 +93,11 @@ parser.add_argument(
     "--loss-selection-output",
     default="loss_selection_scores.csv",
     help="Filename for city-level loss candidate validation scores. Default: loss_selection_scores.csv",
+)
+parser.add_argument(
+    "--experiment-log-output",
+    default="experiment_log.jsonl",
+    help="Append-only JSONL log for run config and validation results. Default: experiment_log.jsonl",
 )
 parser.add_argument(
     "--random-state",
@@ -191,6 +198,7 @@ validation_scores_path = output_dir / args.validation_output
 validation_predictions_path = output_dir / args.validation_predictions_output
 feature_importance_path = output_dir / args.feature_importance_output
 loss_selection_path = output_dir / args.loss_selection_output
+experiment_log_path = output_dir / args.experiment_log_output
 optuna_trials_path = output_dir / args.optuna_output
 best_params_path = output_dir / args.best_params_output
 csv_preview_dir = output_dir / args.csv_preview_dir
@@ -890,7 +898,58 @@ loss_selection_scores.to_csv(loss_selection_path, index=False)
 submission.to_csv(submission_path, index=False)
 
 
-### 7. CSV content previews
+### 7. Quick experiment log
+overall_validation_mae = None
+overall_validation_rows = None
+overall_validation = validation_scores[validation_scores["city"] == "all"]
+if not overall_validation.empty:
+    overall_validation_mae = float(overall_validation["mae"].iloc[0])
+    overall_validation_rows = int(overall_validation["validation_rows"].iloc[0])
+
+city_validation_mae = {}
+for city, city_scores in validation_scores[validation_scores["city"] != "all"].groupby("city", sort=False):
+    city_validation_mae[city] = float(city_scores["mae"].mean())
+
+experiment_log_record = {
+    "logged_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "run_label": "pipeline_run",
+    "script": str(Path(__file__)),
+    "config": {
+        "train_features_csv": str(train_features_path),
+        "test_features_csv": str(test_features_path),
+        "labels_csv": str(labels_path),
+        "submission_format_csv": str(submission_format_path),
+        "random_state": args.random_state,
+        "losses": candidate_losses,
+        "tweedie_variance_power": args.tweedie_variance_power,
+        "tune_hyperparameters": args.tune_hyperparameters,
+        "optuna_trials": args.optuna_trials if args.tune_hyperparameters else 0,
+        "optuna_timeout": args.optuna_timeout if args.tune_hyperparameters else 0,
+    },
+    "results": {
+        "overall_validation_mae": overall_validation_mae,
+        "overall_validation_rows": overall_validation_rows,
+        "city_validation_mae": city_validation_mae,
+        "selected_losses": city_model_losses,
+        "feature_counts": {
+            city: len(feature_columns)
+            for city, feature_columns in city_feature_columns.items()
+        },
+        "model_params": city_model_params,
+    },
+    "outputs": {
+        "validation_scores": str(validation_scores_path),
+        "validation_predictions": str(validation_predictions_path),
+        "feature_importance": str(feature_importance_path),
+        "loss_selection_scores": str(loss_selection_path),
+        "submission": str(submission_path),
+    },
+}
+with experiment_log_path.open("a", encoding="utf-8") as experiment_log_file:
+    experiment_log_file.write(json.dumps(experiment_log_record, sort_keys=True, default=str) + "\n")
+
+
+### 8. CSV content previews
 csv_preview_paths = []
 if not args.skip_csv_previews:
     os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_config_dir))
@@ -1018,6 +1077,7 @@ print(f"Saved validation scores: {validation_scores_path}")
 print(f"Saved validation predictions: {validation_predictions_path}")
 print(f"Saved feature importance: {feature_importance_path}")
 print(f"Saved loss selection scores: {loss_selection_path}")
+print(f"Appended experiment log: {experiment_log_path}")
 print(f"Saved submission: {submission_path}")
 if csv_preview_paths:
     print("Saved CSV preview images:")
