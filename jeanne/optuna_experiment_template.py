@@ -26,8 +26,8 @@ PLOT_DIR = BASE_DIR / "optuna_plots"
 SUBMISSION_OUTPUT_PATH = BASE_DIR / "submission_prediction.csv"
 STORAGE = f"sqlite:///{DB_PATH}"
 CITY_ID = "sj"
-TARGET_TRANSFORM = "log1p"
-STUDY_NAME = "random_forest_forecasting_oliver_features_{}_{}".format(CITY_ID, TARGET_TRANSFORM)
+TARGET_TRANSFORM = "none" #"log1p"
+STUDY_NAME = "random_forest_forecasting_{}_{}".format(CITY_ID, TARGET_TRANSFORM)
 RANDOM_STATE = 7
 N_TRIALS = 50
 MERGE_KEYS = ["city", "year", "weekofyear"]
@@ -399,7 +399,7 @@ def objective(trial: optuna.Trial) -> float:
 
     try:
         fold_maes = []
-
+        # wie funktioniert der fold fuer den trial? wie wird gemittelt
         for fold, (train_index, test_index) in enumerate(yearly_time_series_splits(X_cv), start=1):
             model = build_model(trial)
             model.fit(X_cv.iloc[train_index], transform_target(y_cv.iloc[train_index]))
