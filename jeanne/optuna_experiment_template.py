@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 import optuna
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
@@ -24,8 +25,9 @@ CODECARBON_DIR = BASE_DIR / "codecarbon_logs"
 PLOT_DIR = BASE_DIR / "optuna_plots"
 SUBMISSION_OUTPUT_PATH = BASE_DIR / "submission_prediction.csv"
 STORAGE = f"sqlite:///{DB_PATH}"
-CITY_ID = "iq"
-STUDY_NAME = "random_forest_forecasting_oliver_features_{}".format(CITY_ID)
+CITY_ID = "sj"
+TARGET_TRANSFORM = "none" #"log1p"
+STUDY_NAME = "random_forest_forecasting_{}_{}".format(CITY_ID, TARGET_TRANSFORM)
 RANDOM_STATE = 7
 N_TRIALS = 50
 MERGE_KEYS = ["city", "year", "weekofyear"]
@@ -323,8 +325,34 @@ def build_model(trial: optuna.Trial) -> RandomForestRegressor:
     return build_model_from_params(params)
 
 
-def make_case_count_predictions(raw_predictions, index: pd.Index | None = None) -> pd.Series:
+def transform_target(target: pd.Series) -> pd.Series:
+    if TARGET_TRANSFORM == "log1p":
+        return np.log1p(target)
+    if TARGET_TRANSFORM == "none":
+        return target
+    raise ValueError(f"Unsupported target transform: {TARGET_TRANSFORM}")
+
+
+def inverse_transform_prediction(prediction):
+    if TARGET_TRANSFORM == "log1p":
+        return np.expm1(prediction)
+    if TARGET_TRANSFORM == "none":
+        return prediction
+    raise ValueError(f"Unsupported target transform: {TARGET_TRANSFORM}")
+
+
+def make_case_count_predictions(
+    raw_predictions,
+    index: pd.Index | None = None,
+    inverse_transform: bool = True,
+) -> pd.Series:
     predictions = pd.Series(raw_predictions, index=index, name="total_cases")
+    if inverse_transform:
+        predictions = pd.Series(
+            inverse_transform_prediction(predictions),
+            index=predictions.index,
+            name="total_cases",
+        )
 
     return predictions.clip(lower=0).round().astype(int)
 
@@ -371,12 +399,15 @@ def objective(trial: optuna.Trial) -> float:
 
     try:
         fold_maes = []
-
+        # wie funktioniert der fold fuer den trial? wie wird gemittelt
         for fold, (train_index, test_index) in enumerate(yearly_time_series_splits(X_cv), start=1):
             model = build_model(trial)
-            model.fit(X_cv.iloc[train_index], y_cv.iloc[train_index])
+            model.fit(X_cv.iloc[train_index], transform_target(y_cv.iloc[train_index]))
 
-            pred = model.predict(X_cv.iloc[test_index])
+            pred = make_case_count_predictions(
+                model.predict(X_cv.iloc[test_index]),
+                index=X_cv.iloc[test_index].index,
+            )
             mae = float(mean_absolute_error(y_cv.iloc[test_index], pred))
             fold_maes.append(mae)
             trial.set_user_attr(f"fold_{fold}_mae", mae)
@@ -400,7 +431,7 @@ def plot_best_model_prediction(
     train_index, test_index = final_year_holdout_split(X)
 
     model = build_model_from_params(best_params)
-    model.fit(X.iloc[train_index], y.iloc[train_index])
+    model.fit(X.iloc[train_index], transform_target(y.iloc[train_index]))
     X_test = X.iloc[test_index]
     y_test = y.iloc[test_index]
     prediction = make_case_count_predictions(model.predict(X_test), index=X_test.index)
@@ -446,7 +477,7 @@ def predict_submission_from_test(city_id: str, best_params: dict[str, object]) -
     X_test, test_dates = load_test_data(city_id)
 
     model = build_model_from_params(best_params)
-    model.fit(X_train, y_train)
+    model.fit(X_train, transform_target(y_train))
     predictions = make_case_count_predictions(model.predict(X_test), index=X_test.index)
 
     if "city" not in predictions.reset_index().columns:
@@ -486,7 +517,10 @@ def save_submission_predictions(predictions: pd.Series, output_path: Path = SUBM
     submission["total_cases"] = submission[prediction_column].combine_first(submission["total_cases"])
     submission = submission.drop(columns=[prediction_column])
     submission = submission[["city", "year", "weekofyear", "total_cases"]]
-    submission["total_cases"] = make_case_count_predictions(submission["total_cases"])
+    submission["total_cases"] = make_case_count_predictions(
+        submission["total_cases"],
+        inverse_transform=False,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     submission.to_csv(output_path, index=False)
 
@@ -502,7 +536,7 @@ def plot_submission_prediction(
     X_test, test_dates = load_test_data(city_id)
 
     model = build_model_from_params(best_params)
-    model.fit(X_train, y_train)
+    model.fit(X_train, transform_target(y_train))
     prediction = make_case_count_predictions(model.predict(X_test), index=X_test.index)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -547,6 +581,7 @@ def main() -> None:
     submission_plot_path = plot_submission_prediction(CITY_ID, study.best_params)
 
     print("Study:", STUDY_NAME)
+    print("Target transform:", TARGET_TRANSFORM)
     print("Trials requested:", N_TRIALS)
     completed_trials = [
         trial

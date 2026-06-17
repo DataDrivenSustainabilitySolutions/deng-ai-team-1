@@ -9,7 +9,8 @@ dependencies = [
     "pandas",
     "scikit-learn",
     "statsmodels",
-    "matplotlib"
+    "matplotlib",
+    "torch"
 ]
 
 [build-system]

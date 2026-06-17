@@ -1,0 +1,3 @@
+city,validation_year,train_sequences,validation_sequences,feature_count,sequence_length,best_epoch,mae,final_epochs
+sj,2007,856,52,12,12,2,24.365385055541992,2
+iq,2009,431,52,15,12,1,4.82692289352417,1
