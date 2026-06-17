@@ -7,6 +7,7 @@ Example:
 import argparse
 import math
 import os
+import random
 from pathlib import Path
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
@@ -87,10 +88,22 @@ parser.add_argument(
     help="Filename for final city model feature importance. Default: feature_importance.csv",
 )
 parser.add_argument(
+    "--loss-selection-output",
+    default="loss_selection_scores.csv",
+    help="Filename for city-level loss candidate validation scores. Default: loss_selection_scores.csv",
+)
+parser.add_argument(
     "--random-state",
     type=int,
     default=42,
     help="Random seed for LightGBM. Default: 42",
+)
+parser.add_argument(
+    "--losses",
+    nargs="+",
+    choices=["tweedie", "poisson", "l1"],
+    default=["tweedie", "poisson", "l1"],
+    help="LightGBM loss candidates to evaluate per city. Default: tweedie poisson l1",
 )
 parser.add_argument(
     "--tweedie-variance-power",
@@ -177,11 +190,18 @@ submission_path = output_dir / args.submission_output
 validation_scores_path = output_dir / args.validation_output
 validation_predictions_path = output_dir / args.validation_predictions_output
 feature_importance_path = output_dir / args.feature_importance_output
+loss_selection_path = output_dir / args.loss_selection_output
 optuna_trials_path = output_dir / args.optuna_output
 best_params_path = output_dir / args.best_params_output
 csv_preview_dir = output_dir / args.csv_preview_dir
 merge_keys = ["city", "year", "weekofyear"]
 identifier_columns = {"city", "year", "weekofyear", "week_start_date", "split", "total_cases"}
+loss_objectives = {
+    "tweedie": "tweedie",
+    "poisson": "poisson",
+    "l1": "regression_l1",
+}
+candidate_losses = list(dict.fromkeys(args.losses))
 matplotlib_config_dir = output_dir / ".matplotlib"
 matplotlib_config_dir.mkdir(parents=True, exist_ok=True)
 os.environ["MPLCONFIGDIR"] = str(matplotlib_config_dir)
@@ -205,6 +225,24 @@ if args.csv_preview_max_cols < 1:
 
 if args.csv_preview_dpi < 1:
     raise ValueError("--csv-preview-dpi must be at least 1.")
+
+random.seed(args.random_state)
+np.random.seed(args.random_state)
+os.environ["PYTHONHASHSEED"] = str(args.random_state)
+
+deterministic_lightgbm_params = {
+    "random_state": args.random_state,
+    "seed": args.random_state,
+    "data_random_seed": args.random_state,
+    "feature_fraction_seed": args.random_state,
+    "bagging_seed": args.random_state,
+    "drop_seed": args.random_state,
+    "extra_seed": args.random_state,
+    "deterministic": True,
+    "force_col_wise": True,
+    "n_jobs": 1,
+    "verbose": -1,
+}
 
 if args.tune_hyperparameters:
     try:
@@ -471,55 +509,92 @@ for city in ["sj", "iq"]:
     city_feature_columns[city] = list(dict.fromkeys(selected_columns))
 
 
-### 4. Optional Optuna hyperparameter tuning
-base_model_params = {
-    "objective": "tweedie",
-    "tweedie_variance_power": args.tweedie_variance_power,
+### 4. City loss selection and optional Optuna hyperparameter tuning
+base_hyperparameters = {
     "n_estimators": 300,
     "learning_rate": 0.03,
     "num_leaves": 15,
     "min_child_samples": 20,
     "subsample": 0.9,
+    "subsample_freq": 1,
     "colsample_bytree": 0.9,
     "reg_alpha": 0.1,
     "reg_lambda": 1.0,
-    "random_state": args.random_state,
-    "verbose": -1,
-}
-city_model_params = {
-    city: base_model_params.copy()
-    for city in ["sj", "iq"]
 }
 
 train_model_data = data[data["split"] == "train"].copy()
 test_model_data = data[data["split"] == "test"].copy()
+city_model_params = {}
+city_model_losses = {}
+loss_selection_records = []
 optuna_trial_records = []
 best_param_records = []
 
-if args.tune_hyperparameters:
-    for city, city_train_data in train_model_data.groupby("city", sort=False):
-        city_train_data = city_train_data.sort_values("week_start_date").copy()
-        year_counts = city_train_data.groupby("year").size()
-        full_years = [year for year, rows in year_counts.items() if rows == 52]
-        first_year = int(city_train_data["year"].min())
-        first_full_year_after_start = min(year for year in full_years if year > first_year)
-        validation_years = [
-            year
-            for year in full_years
-            if year > first_full_year_after_start
-        ]
-        feature_columns = city_feature_columns[city]
+def make_model_params(loss_name, hyperparameters, tweedie_variance_power=None):
+    model_params = {
+        "objective": loss_objectives[loss_name],
+        **hyperparameters,
+        **deterministic_lightgbm_params,
+    }
+    if loss_name == "tweedie":
+        model_params["tweedie_variance_power"] = (
+            args.tweedie_variance_power
+            if tweedie_variance_power is None
+            else tweedie_variance_power
+        )
+    return model_params
 
+
+def get_validation_years(city_train_data):
+    year_counts = city_train_data.groupby("year").size()
+    full_years = [year for year, rows in year_counts.items() if rows == 52]
+    first_year = int(city_train_data["year"].min())
+    first_full_year_after_start = min(year for year in full_years if year > first_year)
+    return [
+        year
+        for year in full_years
+        if year > first_full_year_after_start
+    ]
+
+
+def score_city_params(city_train_data, feature_columns, validation_years, model_params):
+    fold_maes = []
+    for validation_year in validation_years:
+        fold_train_data = city_train_data[city_train_data["year"] < validation_year].copy()
+        fold_validation_data = city_train_data[city_train_data["year"] == validation_year].copy()
+
+        model = LGBMRegressor(**model_params)
+        model.fit(
+            fold_train_data[feature_columns],
+            fold_train_data["total_cases"],
+        )
+
+        raw_predictions = model.predict(fold_validation_data[feature_columns])
+        fold_predictions = [
+            int(round(max(0.0, float(raw_prediction))))
+            for raw_prediction in raw_predictions
+        ]
+        fold_maes.append(mean_absolute_error(fold_validation_data["total_cases"], fold_predictions))
+
+    return float(np.mean(fold_maes))
+
+
+for city, city_train_data in train_model_data.groupby("city", sort=False):
+    city_train_data = city_train_data.sort_values("week_start_date").copy()
+    validation_years = get_validation_years(city_train_data)
+    feature_columns = city_feature_columns[city]
+
+    if args.tune_hyperparameters:
         sampler = optuna.samplers.TPESampler(seed=args.random_state)
         study = optuna.create_study(
             direction="minimize",
             sampler=sampler,
-            study_name=f"{city}_lightgbm_tweedie",
+            study_name=f"{city}_lightgbm_loss_search",
         )
 
         def objective(trial):
-            trial_params = {
-                "objective": "tweedie",
+            loss_name = trial.suggest_categorical("loss", candidate_losses)
+            trial_hyperparameters = {
                 "n_estimators": trial.suggest_int("n_estimators", 100, 800, step=50),
                 "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.08, log=True),
                 "num_leaves": trial.suggest_int("num_leaves", 7, 63),
@@ -529,52 +604,48 @@ if args.tune_hyperparameters:
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
                 "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 5.0, log=True),
                 "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
-                "tweedie_variance_power": trial.suggest_float("tweedie_variance_power", 1.1, 1.8),
-                "random_state": args.random_state,
-                "verbose": -1,
             }
-            trial_fold_maes = []
+            tweedie_variance_power = None
+            if loss_name == "tweedie":
+                tweedie_variance_power = trial.suggest_float("tweedie_variance_power", 1.1, 1.8)
 
-            for validation_year in validation_years:
-                fold_train_data = city_train_data[city_train_data["year"] < validation_year].copy()
-                fold_validation_data = city_train_data[city_train_data["year"] == validation_year].copy()
-
-                model = LGBMRegressor(**trial_params)
-                model.fit(
-                    fold_train_data[feature_columns],
-                    fold_train_data["total_cases"],
-                )
-
-                raw_predictions = model.predict(fold_validation_data[feature_columns])
-                fold_predictions = [
-                    int(round(max(0.0, float(raw_prediction))))
-                    for raw_prediction in raw_predictions
-                ]
-
-                fold_mae = mean_absolute_error(fold_validation_data["total_cases"], fold_predictions)
-                trial_fold_maes.append(fold_mae)
-
-            return float(np.mean(trial_fold_maes))
+            trial_params = make_model_params(
+                loss_name,
+                trial_hyperparameters,
+                tweedie_variance_power,
+            )
+            return score_city_params(
+                city_train_data,
+                feature_columns,
+                validation_years,
+                trial_params,
+            )
 
         study.optimize(
             objective,
             n_trials=args.optuna_trials,
             timeout=args.optuna_timeout or None,
             catch=(Exception,),
+            n_jobs=1,
         )
 
         for trial in study.trials:
+            trial_loss = trial.params.get("loss")
             optuna_trial_records.append(
                 {
                     "city": city,
                     "trial_number": trial.number,
                     "state": trial.state.name,
                     "mae": trial.value if trial.value is not None else np.nan,
-                    "objective": "tweedie",
-                    **trial.params,
+                    "loss": trial_loss,
+                    "objective": loss_objectives.get(trial_loss, ""),
+                    **{
+                        key: value
+                        for key, value in trial.params.items()
+                        if key != "loss"
+                    },
                     "subsample_freq": 1,
-                    "random_state": args.random_state,
-                    "verbose": -1,
+                    **deterministic_lightgbm_params,
                 }
             )
 
@@ -583,24 +654,89 @@ if args.tune_hyperparameters:
             states=[optuna.trial.TrialState.COMPLETE],
         )
         if completed_trials:
-            best_params = {
-                "objective": "tweedie",
-                **study.best_params,
-                "subsample_freq": 1,
-                "random_state": args.random_state,
-                "verbose": -1,
+            best_search_params = study.best_params.copy()
+            best_loss = best_search_params.pop("loss")
+            best_hyperparameters = {
+                key: best_search_params[key]
+                for key in base_hyperparameters
+                if key in best_search_params
             }
+            best_hyperparameters["subsample_freq"] = 1
+            best_tweedie_variance_power = best_search_params.get("tweedie_variance_power")
+            best_params = make_model_params(
+                best_loss,
+                best_hyperparameters,
+                best_tweedie_variance_power,
+            )
+            city_model_losses[city] = best_loss
             city_model_params[city] = best_params
             best_param_records.append(
                 {
                     "city": city,
                     "best_mae": study.best_value,
+                    "loss": best_loss,
                     **best_params,
                 }
             )
 
+            for loss_name in candidate_losses:
+                loss_trials = [
+                    trial
+                    for trial in completed_trials
+                    if trial.params.get("loss") == loss_name
+                ]
+                best_loss_mae = (
+                    min(trial.value for trial in loss_trials)
+                    if loss_trials
+                    else np.nan
+                )
+                loss_selection_records.append(
+                    {
+                        "city": city,
+                        "loss": loss_name,
+                        "objective": loss_objectives[loss_name],
+                        "selection_mode": "optuna",
+                        "n_trials": len(loss_trials),
+                        "mae": best_loss_mae,
+                        "selected": loss_name == best_loss,
+                    }
+                )
+    else:
+        city_loss_records = []
+        city_candidate_params = {}
+        for loss_name in candidate_losses:
+            model_params = make_model_params(loss_name, base_hyperparameters)
+            candidate_mae = score_city_params(
+                city_train_data,
+                feature_columns,
+                validation_years,
+                model_params,
+            )
+            city_candidate_params[loss_name] = model_params
+            city_loss_records.append(
+                {
+                    "city": city,
+                    "loss": loss_name,
+                    "objective": loss_objectives[loss_name],
+                    "selection_mode": "default_params",
+                    "n_trials": 0,
+                    "mae": candidate_mae,
+                    "selected": False,
+                }
+            )
+
+        best_loss_record = min(city_loss_records, key=lambda record: record["mae"])
+        best_loss = best_loss_record["loss"]
+        city_model_losses[city] = best_loss
+        city_model_params[city] = city_candidate_params[best_loss]
+
+        for record in city_loss_records:
+            record["selected"] = record["loss"] == best_loss
+            loss_selection_records.append(record)
+
 optuna_trials = pd.DataFrame(optuna_trial_records)
 best_params = pd.DataFrame(best_param_records)
+loss_selection_scores = pd.DataFrame(loss_selection_records)
 if args.tune_hyperparameters:
     optuna_trials.to_csv(optuna_trials_path, index=False)
     best_params.to_csv(best_params_path, index=False)
@@ -614,16 +750,9 @@ all_validation_predictions = []
 
 for city, city_train_data in train_model_data.groupby("city", sort=False):
     city_train_data = city_train_data.sort_values("week_start_date").copy()
-    year_counts = city_train_data.groupby("year").size()
-    full_years = [year for year, rows in year_counts.items() if rows == 52]
-    first_year = int(city_train_data["year"].min())
-    first_full_year_after_start = min(year for year in full_years if year > first_year)
-    validation_years = [
-        year
-        for year in full_years
-        if year > first_full_year_after_start
-    ]
+    validation_years = get_validation_years(city_train_data)
     feature_columns = city_feature_columns[city]
+    selected_loss = city_model_losses[city]
 
     for validation_year in validation_years:
         fold_train_data = city_train_data[city_train_data["year"] < validation_year].copy()
@@ -648,6 +777,7 @@ for city, city_train_data in train_model_data.groupby("city", sort=False):
             validation_prediction_records.append(
                 {
                     "city": row.city,
+                    "loss": selected_loss,
                     "year": row.year,
                     "weekofyear": row.weekofyear,
                     "week_start_date": row.week_start_date,
@@ -664,6 +794,7 @@ for city, city_train_data in train_model_data.groupby("city", sort=False):
         validation_score_records.append(
             {
                 "city": city,
+                "loss": selected_loss,
                 "validation_year": validation_year,
                 "train_rows": len(fold_train_data),
                 "validation_rows": len(fold_validation_data),
@@ -675,6 +806,7 @@ if all_validation_actuals:
     validation_score_records.append(
         {
             "city": "all",
+            "loss": "selected_by_city",
             "validation_year": "all",
             "train_rows": "",
             "validation_rows": len(all_validation_actuals),
@@ -695,6 +827,7 @@ for city, city_train_data in train_model_data.groupby("city", sort=False):
     city_train_data = city_train_data.sort_values("week_start_date").copy()
     city_test_data = test_model_data[test_model_data["city"] == city].sort_values("week_start_date").copy()
     feature_columns = city_feature_columns[city]
+    selected_loss = city_model_losses[city]
 
     model = LGBMRegressor(**city_model_params[city])
     model.fit(
@@ -708,6 +841,7 @@ for city, city_train_data in train_model_data.groupby("city", sort=False):
         feature_importance_records.append(
             {
                 "city": city,
+                "loss": selected_loss,
                 "feature": feature,
                 "importance_gain": gain,
                 "importance_split": split,
@@ -752,6 +886,7 @@ feature_importance = pd.DataFrame(feature_importance_records).sort_values(
 validation_scores.to_csv(validation_scores_path, index=False)
 validation_predictions.to_csv(validation_predictions_path, index=False)
 feature_importance.to_csv(feature_importance_path, index=False)
+loss_selection_scores.to_csv(loss_selection_path, index=False)
 submission.to_csv(submission_path, index=False)
 
 
@@ -773,6 +908,7 @@ if not args.skip_csv_previews:
         ("validation_scores", validation_scores_path, validation_scores),
         ("validation_predictions", validation_predictions_path, validation_predictions),
         ("feature_importance", feature_importance_path, feature_importance),
+        ("loss_selection_scores", loss_selection_path, loss_selection_scores),
         ("submission", submission_path, submission),
     ]
     if args.tune_hyperparameters:
@@ -866,6 +1002,10 @@ print(f"Imported test rows: {len(test_data)}")
 print(f"Numeric feature missing values before interpolation: {int(missing_before.sum())}")
 print(f"Numeric feature missing values after interpolation: {int(missing_after.sum())}")
 print(f"Engineered feature columns: {len(engineered_feature_columns)}")
+print(
+    "Selected losses: "
+    + ", ".join(f"{city}={loss}" for city, loss in sorted(city_model_losses.items()))
+)
 print(f"Validation folds: {len(validation_scores[validation_scores['city'] != 'all'])}")
 if not validation_scores.empty:
     overall_mae = validation_scores.loc[validation_scores["city"] == "all", "mae"]
@@ -877,6 +1017,7 @@ print(f"Saved preprocessed and engineered test data: {preprocessed_test_path}")
 print(f"Saved validation scores: {validation_scores_path}")
 print(f"Saved validation predictions: {validation_predictions_path}")
 print(f"Saved feature importance: {feature_importance_path}")
+print(f"Saved loss selection scores: {loss_selection_path}")
 print(f"Saved submission: {submission_path}")
 if csv_preview_paths:
     print("Saved CSV preview images:")

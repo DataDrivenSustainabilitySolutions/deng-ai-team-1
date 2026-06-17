@@ -135,14 +135,6 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "--target-rolling-autocorrelation-output",
-    default="target_rolling_autocorrelation.csv",
-    help=(
-        "Filename for target rolling autocorrelation by city and window. "
-        "Default: target_rolling_autocorrelation.csv"
-    ),
-)
-parser.add_argument(
     "--missing-summary-output",
     default="missing_summary.csv",
     help="Filename for missing-value counts before and after interpolation. Default: missing_summary.csv",
@@ -185,7 +177,6 @@ top_correlations_path = output_dir / args.top_correlations_output
 rolling_summary_path = output_dir / args.rolling_summary_output
 window_summary_path = output_dir / args.window_summary_output
 feature_group_summary_path = output_dir / args.feature_group_summary_output
-target_rolling_autocorrelation_path = output_dir / args.target_rolling_autocorrelation_output
 missing_summary_path = output_dir / args.missing_summary_output
 merge_keys = ["city", "year", "weekofyear"]
 identifier_columns = {"city", "year", "weekofyear", "week_start_date", "total_cases"}
@@ -410,46 +401,6 @@ feature_group_summary = feature_group_summary.merge(
 )
 
 
-### 6. Target rolling autocorrelation
-# Target rolling history starts at lag 1 so the current label is never used as a feature.
-target_rolling_autocorrelation_records = []
-for city, city_data in data.groupby("city", sort=False):
-    city_data = city_data.sort_values("week_start_date").reset_index(drop=True)
-    target = city_data["total_cases"]
-    lagged_target = target.shift(1)
-
-    for window in window_sizes:
-        rolling_target = lagged_target.rolling(
-            window=window,
-            min_periods=args.min_window_periods,
-        ).mean()
-        pair_data = pd.DataFrame(
-            {
-                "target": target,
-                "rolling_target": rolling_target,
-            }
-        ).dropna()
-
-        pearson_corr = float("nan")
-        if (
-            len(pair_data) >= args.min_pairs
-            and pair_data["target"].nunique() > 1
-            and pair_data["rolling_target"].nunique() > 1
-        ):
-            pearson_corr = pair_data["target"].corr(pair_data["rolling_target"])
-
-        target_rolling_autocorrelation_records.append(
-            {
-                "city": city,
-                "window_weeks": window,
-                "rolling_stat": "mean",
-                "n_pairs": len(pair_data),
-                "pearson_corr": pearson_corr,
-                "abs_pearson_corr": abs(pearson_corr),
-            }
-        )
-
-target_rolling_autocorrelation = pd.DataFrame(target_rolling_autocorrelation_records)
 missing_summary = pd.DataFrame(
     {
         "feature": numeric_feature_columns,
@@ -467,7 +418,6 @@ top_correlations.to_csv(top_correlations_path, index=False)
 rolling_summary.to_csv(rolling_summary_path, index=False)
 window_summary.to_csv(window_summary_path, index=False)
 feature_group_summary.to_csv(feature_group_summary_path, index=False)
-target_rolling_autocorrelation.to_csv(target_rolling_autocorrelation_path, index=False)
 missing_summary.to_csv(missing_summary_path, index=False)
 
 for legacy_path in [
@@ -613,30 +563,6 @@ if not args.skip_plots:
         plt.close(figure)
         saved_plot_paths.append(plot_path)
 
-    if not target_rolling_autocorrelation.empty:
-        figure, axis = plt.subplots(figsize=(9, 5))
-        for city, city_target_rolling in target_rolling_autocorrelation.groupby("city", sort=False):
-            city_target_rolling = city_target_rolling.sort_values("window_weeks")
-            axis.plot(
-                city_target_rolling["window_weeks"],
-                city_target_rolling["pearson_corr"],
-                marker="o",
-                linewidth=1.5,
-                label=city,
-            )
-        axis.set_title("Target rolling autocorrelation by city")
-        axis.set_xlabel("Rolling target-history window weeks")
-        axis.set_ylabel("Pearson correlation")
-        axis.set_xticks(window_sizes)
-        axis.grid(True, alpha=0.25)
-        axis.legend(title="city")
-        figure.tight_layout()
-
-        plot_path = output_dir / "target_rolling_autocorrelation.png"
-        figure.savefig(plot_path, dpi=args.plot_dpi)
-        plt.close(figure)
-        saved_plot_paths.append(plot_path)
-
 print("Rolling feature analysis completed.")
 print(f"Cities analyzed: {', '.join(data['city'].drop_duplicates())}")
 print(f"Features analyzed: {len(numeric_feature_columns)}")
@@ -649,7 +575,6 @@ print(f"Saved top rolling correlations by city: {top_correlations_path}")
 print(f"Saved rolling summary: {rolling_summary_path}")
 print(f"Saved window summary: {window_summary_path}")
 print(f"Saved feature-group rolling summary: {feature_group_summary_path}")
-print(f"Saved target rolling autocorrelation: {target_rolling_autocorrelation_path}")
 if saved_plot_paths:
     print("Saved plots:")
     for plot_path in saved_plot_paths:
