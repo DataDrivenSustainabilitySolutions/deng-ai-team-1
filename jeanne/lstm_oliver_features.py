@@ -1366,7 +1366,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--target-transform", choices=["none", "log1p"], default="none")
-    parser.add_argument("--optuna-trials", type=int, default=50, help="Use 0 to skip Optuna tuning.")
+    parser.add_argument("--optuna-trials", type=int, default=0, help="Use 0 to skip Optuna tuning.")
     parser.add_argument("--random-state", type=int, default=7)
     parser.add_argument("--torch-threads", type=int, default=1)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
