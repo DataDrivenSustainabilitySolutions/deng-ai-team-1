@@ -1,0 +1,73 @@
+candidate,candidate_label,uses_weather,city,validation_year,train_rows,validation_rows,feature_count,mae
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,1992,87,52,2,20.23076923076923
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,1992,87,52,125,19.01923076923077
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,1992,87,52,127,18.576923076923077
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,1993,139,52,2,15.576923076923077
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,1993,139,52,125,19.807692307692307
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,1993,139,52,127,16.942307692307693
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,1994,191,52,2,96.38461538461539
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,1994,191,52,125,86.03846153846153
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,1994,191,52,127,92.84615384615384
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,1995,243,52,2,19.576923076923077
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,1995,243,52,125,30.0
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,1995,243,52,127,22.96153846153846
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,1996,295,52,2,14.461538461538462
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,1996,295,52,125,14.365384615384615
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,1996,295,52,127,14.23076923076923
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,1997,347,52,2,9.192307692307692
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,1997,347,52,125,10.576923076923077
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,1997,347,52,127,8.923076923076923
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,1998,399,52,2,61.40384615384615
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,1998,399,52,125,62.0
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,1998,399,52,127,61.57692307692308
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,1999,451,52,2,11.576923076923077
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,1999,451,52,125,15.346153846153847
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,1999,451,52,127,12.23076923076923
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,2000,503,52,2,19.884615384615383
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,2000,503,52,125,18.5
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,2000,503,52,127,19.423076923076923
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,2001,555,52,2,9.903846153846153
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,2001,555,52,125,16.21153846153846
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,2001,555,52,127,10.211538461538462
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,2002,607,52,2,19.403846153846153
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,2002,607,52,125,20.326923076923077
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,2002,607,52,127,19.673076923076923
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,2003,659,52,2,8.596153846153847
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,2003,659,52,125,12.865384615384615
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,2003,659,52,127,9.326923076923077
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,2004,711,52,2,13.423076923076923
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,2004,711,52,125,16.73076923076923
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,2004,711,52,127,14.346153846153847
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,2005,763,52,2,23.576923076923077
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,2005,763,52,125,24.365384615384617
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,2005,763,52,127,23.28846153846154
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,2006,815,52,2,12.461538461538462
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,2006,815,52,125,5.903846153846154
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,2006,815,52,127,9.942307692307692
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,2007,867,52,2,22.23076923076923
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,2007,867,52,125,24.076923076923077
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,2007,867,52,127,22.096153846153847
+calendar_l1_raw,Calendar-only L1 baseline,False,iq,2002,78,52,2,13.538461538461538
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,iq,2002,78,52,79,13.538461538461538
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,iq,2002,78,52,81,13.538461538461538
+calendar_l1_raw,Calendar-only L1 baseline,False,iq,2003,130,52,2,1.9615384615384615
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,iq,2003,130,52,79,4.211538461538462
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,iq,2003,130,52,81,2.173076923076923
+calendar_l1_raw,Calendar-only L1 baseline,False,iq,2004,182,52,2,10.788461538461538
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,iq,2004,182,52,79,10.461538461538462
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,iq,2004,182,52,81,10.596153846153847
+calendar_l1_raw,Calendar-only L1 baseline,False,iq,2005,234,52,2,3.980769230769231
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,iq,2005,234,52,79,3.1153846153846154
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,iq,2005,234,52,81,3.5384615384615383
+calendar_l1_raw,Calendar-only L1 baseline,False,iq,2006,286,52,2,6.134615384615385
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,iq,2006,286,52,79,5.384615384615385
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,iq,2006,286,52,81,5.6923076923076925
+calendar_l1_raw,Calendar-only L1 baseline,False,iq,2007,338,52,2,3.923076923076923
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,iq,2007,338,52,79,4.0
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,iq,2007,338,52,81,3.8653846153846154
+calendar_l1_raw,Calendar-only L1 baseline,False,iq,2008,390,52,2,13.153846153846153
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,iq,2008,390,52,79,13.076923076923077
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,iq,2008,390,52,81,13.115384615384615
+calendar_l1_raw,Calendar-only L1 baseline,False,iq,2009,442,52,2,4.134615384615385
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,iq,2009,442,52,79,5.384615384615385
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,iq,2009,442,52,81,4.326923076923077

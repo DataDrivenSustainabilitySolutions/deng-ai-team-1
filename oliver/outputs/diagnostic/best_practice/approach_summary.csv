@@ -1,0 +1,10 @@
+candidate,candidate_label,uses_weather,city,validation_rows,mae,risk_margin,selection_mae
+calendar_l1_raw,Calendar-only L1 baseline,False,sj,832,23.61778846153846,0.0,23.61778846153846
+calendar_l1_raw,Calendar-only L1 baseline,False,iq,416,7.201923076923077,0.0,7.201923076923077
+calendar_l1_raw,Calendar-only L1 baseline,False,all,1248,18.145833333333332,0.0,18.145833333333332
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,sj,832,24.75841346153846,0.25,25.00841346153846
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,iq,416,7.396634615384615,0.25,7.646634615384615
+broad_weather_l1_log,Broad weather L1 model with log1p target,True,all,1248,18.971153846153847,0.25,19.221153846153847
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,sj,832,23.537259615384617,0.25,23.787259615384617
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,iq,416,7.105769230769231,0.25,7.355769230769231
+calendar_broad_log_blend,Two-thirds calendar plus one-third weather blend,True,all,1248,18.060096153846153,0.25,18.310096153846153

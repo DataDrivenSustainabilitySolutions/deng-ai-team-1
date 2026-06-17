@@ -1,0 +1,3 @@
+city,selection_mode,selection_id,best_trial_number,best_mae,n_estimators,max_depth,min_samples_leaf,min_samples_split,max_features,bootstrap,random_state,n_jobs
+sj,optuna,34,34,30.810096153846153,500,4,7,9,0.5,True,42,1
+iq,optuna,27,27,7.983173076923077,600,4,3,17,log2,True,42,1

@@ -1,0 +1,3 @@
+iteration,model_type,city,validation_year,train_rows,validation_rows,all_year_mae,recent_validation_years,recent_mae,recent_score_weight,selection_mae
+a24_recent7_calendar_lgbm_l1_harmonic2,lgbm_calendar_recent_window,sj,all,,832,22.729567307692307,4,16.754807692307693,0.3,20.93713942307692
+a27_recent4_calendar_lgbm_l1_harmonic2,lgbm_calendar_recent_window,iq,all,,416,6.959134615384615,4,6.350961538461538,0.3,6.776682692307691

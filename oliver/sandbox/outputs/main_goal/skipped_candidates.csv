@@ -1,0 +1,2 @@
+iteration,reason
+12_catboost_conservative_lag_roll_raw,catboost is not installed; skipped optional CatBoost comparison

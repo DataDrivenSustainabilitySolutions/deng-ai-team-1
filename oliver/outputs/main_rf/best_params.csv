@@ -1,0 +1,3 @@
+city,grid_index,best_mae,bootstrap,max_depth,max_features,min_samples_leaf,n_estimators,random_state,n_jobs
+sj,1,31.849759615384617,True,8.0,sqrt,3,300,42,1
+iq,5,8.30528846153846,True,,sqrt,3,300,42,1

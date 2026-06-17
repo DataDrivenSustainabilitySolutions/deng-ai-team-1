@@ -1,0 +1,84 @@
+{
+  "city_summaries": [
+    {
+      "city": "sj",
+      "iteration": "a47_sj_quantile_lgbm_frontier_blend",
+      "max_prediction": 26,
+      "mean_prediction": 14.403846153846153,
+      "members": [
+        {
+          "max_prediction": 23,
+          "mean_prediction": 13.976923076923077,
+          "min_prediction": 5,
+          "model": "a39_recent7_calendar_quantile_harmonic2",
+          "weight": 0.5
+        },
+        {
+          "max_prediction": 29,
+          "mean_prediction": 14.661538461538461,
+          "min_prediction": 3,
+          "model": "a37_recent7_calendar_lgbm_l1_harmonic2_more_regularized",
+          "weight": 0.5
+        }
+      ],
+      "min_prediction": 4,
+      "rows": 260
+    },
+    {
+      "city": "iq",
+      "iteration": "a46_iq_lgbm_rf_frontier_blend",
+      "max_prediction": 17,
+      "mean_prediction": 6.634615384615385,
+      "members": [
+        {
+          "max_prediction": 15,
+          "mean_prediction": 5.711538461538462,
+          "min_prediction": 1,
+          "model": "a29_recent2_calendar_lgbm_l1_harmonic2",
+          "weight": 0.3333333333333333
+        },
+        {
+          "max_prediction": 16,
+          "mean_prediction": 6.794871794871795,
+          "min_prediction": 1,
+          "model": "a33_recent4_calendar_lgbm_l1_harmonic2_regularized",
+          "weight": 0.3333333333333333
+        },
+        {
+          "max_prediction": 19,
+          "mean_prediction": 7.4423076923076925,
+          "min_prediction": 2,
+          "model": "a35_recent4_calendar_rf_abs_harmonic2",
+          "weight": 0.3333333333333333
+        }
+      ],
+      "min_prediction": 1,
+      "rows": 156
+    }
+  ],
+  "feature_policy": "calendar harmonics only; no total_cases-derived input features",
+  "fixed_random_state": 42,
+  "input_paths": {
+    "labels_csv": "data/dengue_labels_train.csv",
+    "submission_format_csv": "data/submission_format.csv",
+    "test_features_csv": "data/dengue_features_test.csv",
+    "train_features_csv": "data/dengue_features_train.csv"
+  },
+  "log_target": false,
+  "output_paths": {
+    "changelog_md": "/Users/oliverhennhoefer/Code/Github/deng-ai-team-1/oliver/sandbox/outputs/main_goal_best/smoke_best/changelog.md",
+    "output_dir": "/Users/oliverhennhoefer/Code/Github/deng-ai-team-1/oliver/sandbox/outputs/main_goal_best/smoke_best",
+    "run_summary_json": "/Users/oliverhennhoefer/Code/Github/deng-ai-team-1/oliver/sandbox/outputs/main_goal_best/smoke_best/run_summary.json",
+    "submission_csv": "/Users/oliverhennhoefer/Code/Github/deng-ai-team-1/oliver/sandbox/outputs/main_goal_best/smoke_best/submission.csv"
+  },
+  "raw_target": true,
+  "reference_comparison": {
+    "changed_rows": 0,
+    "exact_match": true,
+    "max_abs_difference": 0,
+    "mean_abs_difference_on_changed_rows": 0.0,
+    "reference_found": true,
+    "reference_submission": "/Users/oliverhennhoefer/Code/Github/deng-ai-team-1/oliver/sandbox/outputs/main_goal_additive/20260617T141841Z/submission.csv"
+  },
+  "run_label": "smoke_best"
+}
